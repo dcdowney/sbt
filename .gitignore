@@ -1,6 +1,8 @@
 /target/
 
 
+# the below is from https://github.com/github/gitignore/blob/master/Global/Eclipse.gitignore
+
 *.pydevproject
 .metadata
 .gradle
