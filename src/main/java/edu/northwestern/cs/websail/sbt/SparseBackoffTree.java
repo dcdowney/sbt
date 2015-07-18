@@ -1,7 +1,6 @@
 package edu.northwestern.cs.websail.sbt;
 import gnu.trove.map.hash.TIntIntHashMap;
 
-import java.util.Arrays;
 import java.util.Random;
 
 
@@ -89,6 +88,33 @@ public class SparseBackoffTree {
 			_children[j] = new SparseBackoffTree(_struct._children[j]);
 		}
 		_children[j].addMass(res, d);
+	}
+	
+	public static SparseBackoffTree sum(SparseBackoffTree [] sbts, SparseBackoffTreeStructure struct) {
+		SparseBackoffTree out = new SparseBackoffTree(struct);
+		for(int i=0; i<sbts.length; i++) {
+			out.add(sbts[i]);
+		}
+		return out;
+	}
+	
+	//adds the given sbt's mass to this sbt
+	//assumes shared struct
+	public void add(SparseBackoffTree sbt) {
+		if(sbt != null) {
+			this._totalMass += sbt._totalMass;
+			this._smooth += sbt._smooth;
+			this._delta += sbt._delta;
+			for(int i=0; i<this._childMass.length; i++) {
+				this._childMass[i] += sbt._childMass[i];
+				if(sbt._children[i] != null) {
+					if(this._children[i] == null) {
+						this._children[i] = new SparseBackoffTree(this._struct._children[i]);
+					}
+					this._children[i].add(sbt._children[i]);
+				}
+			}
+		}
 	}
 	
 	//selects the state at given mass pt
@@ -215,6 +241,19 @@ public class SparseBackoffTree {
 		for(int i=0; i<out.length - 1; i++) {
 			out[i+1] = sbt._childMass[localIdxTrace[i]];
 			if(i < out.length - 2)
+				sbt = sbt._children[localIdxTrace[i]];
+		}
+		return out;
+	}
+	
+	//returns a two-element array {smooth total, count total} for the given leaf
+	public double [] getSmoothAndCount(int leafIdx) {
+		int [] localIdxTrace = _struct.getLocalIdxTrace(leafIdx);
+		double [] out = new double[2];
+		SparseBackoffTree sbt = this;
+		for(int i=0; i<localIdxTrace.length + 1; i++) {
+			out[0] += sbt._smooth;
+			if(i < out.length - 1)
 				sbt = sbt._children[localIdxTrace[i]];
 		}
 		return out;
