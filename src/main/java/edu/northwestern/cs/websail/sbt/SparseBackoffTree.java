@@ -259,6 +259,26 @@ public class SparseBackoffTree {
 		return out;
 	}
 	
+	//divides leaf counts and re-totals
+	//returns new total
+	public double divideCountsBy(double [] norm) {
+		for(int i=0; i<_childMass.length; i++) {
+			if(_childMass[i] > 0.0) {
+				double prev = _childMass[i];
+				if(_children==null) { //leaf
+					int gIdx = _struct.getGlobalIndex(i);
+					double n = norm[gIdx];
+					_childMass[i] /= n;
+				}
+				else {
+					_childMass[i] = divideCountsBy(norm);
+				}
+				_totalMass -= (prev - _childMass[i]);
+			}
+		}
+		return _totalMass;
+	}
+	
 	public static void testSubtraction() {
 		double [] ds = new double [] {0.24, 0.36, 0.3};
 		SparseBackoffTreeStructure struct = new SparseBackoffTreeStructure(new int [] {2, 2, 3}, ds);

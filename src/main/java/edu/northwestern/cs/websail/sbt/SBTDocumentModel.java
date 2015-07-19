@@ -277,26 +277,28 @@ public class SBTDocumentModel {
     
     
 	//returns array of amt_i
-	//such that if we divide leaf counts by amt_i such that for all i, count at i + smoothing at i = max current smoother + 1
-	public static float [] getNormalizers(SparseBackoffTree [] shds, SparseBackoffTreeStructure struct) {
+	//such that if we divide leaf counts by amt_i, we get "proper smoothing"
+    //TODO: improve this comment
+	public static double [] getNormalizers(SparseBackoffTree [] shds, SparseBackoffTreeStructure struct) {
 		int numStates = struct.numLeaves();
-		float [] count = new float[numStates];
-		float [] smoothing = new float[numStates];
+		double [] count = new double[numStates];
+		double [] smoothing = new double[numStates];
 		SparseBackoffTree shdAgg = SparseBackoffTree.sum(shds, struct);
-		float maxSmooth = 0.0f;
-		float sumCount = 0.0f;
-		float sumSmoother = 0.0f;
+		double maxSmooth = 0.0f;
+		double sumCount = 0.0f;
+		double sumSmoother = 0.0f;
 		for(int i=0; i<numStates; i++) {
-			smoothing[i] += shdAgg.getSmoother(i);
+			double [] smoothAndCount = shdAgg.getSmoothAndCount(i);
+			smoothing[i] = smoothAndCount[i];
 			if(smoothing[i] > maxSmooth) {
 				maxSmooth = smoothing[i];
 			}
-			count[i] += shdAgg.get(i);
+			count[i] = smoothAndCount[i];
 			sumCount += count[i];
 			sumSmoother += smoothing[i];
 		}
-		float [] out = new float[numStates];
-		float target = Math.max(maxSmooth + 1.0f, (sumSmoother + sumCount)/numStates);
+		double [] out = new double[numStates];
+		double target = Math.max(maxSmooth + 1.0f, (sumSmoother + sumCount)/numStates);
 		for(int i=0; i<out.length; i++) {
 			out[i] = count[i]/(target + 0.001f - smoothing[i]);
 			if(out[i] < 0.0f)
@@ -304,16 +306,15 @@ public class SBTDocumentModel {
 		}
 		return out;
 	}
-    
-    public void updateModel(double [] wordEndPts) {
+	
+    public void updateModel() {
 		
     	this.updateWordParamsFromZs(this.interpolateEndPoints(_wordsDeltaEndPts, _branchingFactors.length));
-		
-		_topicMarginal[_topicMarginal.length - 1] = getNormalizers(_topicGivenWord);
-		//_topicMarginal = getTopicMarginal(_topicGivenDoc);
-		divideMarginal(_topicGivenWord);
-		outputSomeStuff();
-		System.out.println("\tdiscounts doc: " + Arrays.toString(dsDocs) + "\tword: " + Arrays.toString(dsWords));
+    	
+		_topicMarginal = getNormalizers(_topicGivenWord, _struct);
+		for(int i=0; i<_topicGivenWord.length; i++) 
+			_topicGivenWord[i].divideCountsBy(_topicMarginal);
+		System.out.println("\tdiscounts doc: " + Arrays.toString(this._docsDeltaEndPts) + "\tword: " + Arrays.toString(this._wordsDeltaEndPts));
     }
     
     public void optimizeParameters() {
