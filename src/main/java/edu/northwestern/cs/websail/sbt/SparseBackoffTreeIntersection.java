@@ -22,17 +22,17 @@ public class SparseBackoffTreeIntersection {
 	double _totalMass;
 	
 	public SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect) {
-		this(sbtsToIntersect, -1);
+		this(sbtsToIntersect, -1, null);
 	}
 	
 	
 	//if skipLeaf < 1, means no skipLeaf
-	public SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect, int skipLeaf) {
-		this(sbtsToIntersect, skipLeaf, 0);
+	public SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect, int skipLeaf, double [] amountsToSubtract) {
+		this(sbtsToIntersect, skipLeaf, 0, amountsToSubtract);
 	}
 	
-	public SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect, int skipLeaf, int smoothMin) {
-		this(sbtsToIntersect, SBTSubtractor.getSubs(sbtsToIntersect, skipLeaf), smoothMin);
+	public SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect, int skipLeaf, int smoothMin, double [] amountsToSubtract) {
+		this(sbtsToIntersect, SBTSubtractor.getSubs(sbtsToIntersect, skipLeaf, amountsToSubtract), smoothMin);
 	}
 	
 	public SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect, SBTSubtractor [] subs, int smoothMin) {
@@ -456,7 +456,7 @@ public class SparseBackoffTreeIntersection {
 		
 		long t = System.currentTimeMillis();
 		SparseBackoffTreeIntersection sbti = new SparseBackoffTreeIntersection(new SparseBackoffTree[] {sbt, sbt2, sbt3, sbt4},
-				3);
+				3, new double [] {1.0, 1.0, 1.0, 1.0});
 		System.out.println("intersection mass: " + sbti._totalMass + " should be approx " + 0.3409830);
 		t = System.currentTimeMillis() - t;
 		System.out.println("intersection time elapsed: " + t);

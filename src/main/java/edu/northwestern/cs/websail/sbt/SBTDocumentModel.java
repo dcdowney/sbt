@@ -2,7 +2,10 @@ package edu.northwestern.cs.websail.sbt;
 
 import java.io.BufferedReader;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStreamReader;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -12,6 +15,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import gnu.trove.iterator.TIntDoubleIterator;
+import gnu.trove.iterator.TIntIterator;
 import gnu.trove.list.array.TIntArrayList;
 import gnu.trove.map.hash.TIntDoubleHashMap;
 
@@ -40,7 +44,7 @@ public class SBTDocumentModel {
 	//Model information:
 	int [] _branchingFactors;
 	SparseBackoffTreeStructure _struct = null;
-	SparseBackoffTree [] _topicGivenDoc = null;
+	//SparseBackoffTree [] _topicGivenDoc = null;
 	SparseBackoffTree [] _topicGivenWord = null; 
 	double [] _topicMarginal;
 	double [] _docsDeltaEndPts = new double [] {0.1, 0.1};
@@ -154,6 +158,58 @@ public class SBTDocumentModel {
 		brIn.close();
 	}
 	
+	private TIntDoubleHashMap aggregateCounts(TIntArrayList occurs) {
+		TIntDoubleHashMap out = new TIntDoubleHashMap();
+		TIntIterator it = occurs.iterator();
+		while(it.hasNext()) {
+			int i = it.next();
+			out.adjustOrPutValue(i, 1.0, 1.0);
+		}
+		return out;
+	}
+	
+	//scans doc, resampling each variable.  Not used at test time.
+	//returns number of changes
+	private int sampleDoc(int docId) {
+		int changes = 0;
+		TIntArrayList doc = _docs[docId];
+		TIntDoubleHashMap docCts = aggregateCounts(doc);
+		SparseBackoffTree sbtDoc = new SparseBackoffTree(_struct);
+		sbtDoc.addAllMass(docCts);
+		for(int i=0; i<doc.size(); i++) {
+			int newZ = sampleZ(docId, i, false, sbtDoc);
+			if(newZ != doc.get(i))
+				changes++;
+			doc.set(i, newZ);
+		}
+		return changes;
+	}
+	
+	public int sampleZ(int doc, int pos, boolean testing, SparseBackoffTree topicGivenDoc) {
+		int w = _docs[doc].get(pos);
+		int curZ = _z[doc].get(pos);
+		double bMarginalInv = 1.0f;
+		if(curZ >= 0)
+			bMarginalInv = 1.0 / _topicMarginal[curZ];
+		SparseBackoffTree [] sbtPair = new SparseBackoffTree [] {topicGivenDoc, _topicGivenWord[w]};
+		double [] subPair = new double [] {1.0, bMarginalInv};
+		if(testing) //don't subtract from word distribution at test time:
+			subPair[1] = 0.0;
+		SparseBackoffTreeIntersection sbti = new SparseBackoffTreeIntersection(sbtPair, curZ, subPair);
+		return sbti.sample(_r);
+	}
+	
+    private int sampleRange(int start, int end) {
+    	
+    	int chg = 0;
+    	
+		for(int i=start; i<=end; i++) {
+			chg += sampleDoc(i);
+		}
+
+		return chg;
+    }
+	
 	public static TIntArrayList lineToList(String sLine) {
 		String [] idFeats = sLine.split("\t");
 		String feats = idFeats[1];
@@ -226,7 +282,7 @@ public class SBTDocumentModel {
 		}
 	}
 	
-	public double [] interpolateEndPoints(double [] endPts, int length) {
+	public static double [] interpolateEndPoints(double [] endPts, int length) {
 		double [] out = new double[length];
 		double delt = (endPts[1] - endPts[0])/(length - 1);
 		for(int i=0; i<length; i++) {
@@ -332,16 +388,36 @@ public class SBTDocumentModel {
 		}
 	}
 	
+	public void writeModel(String outFile) throws Exception {
+		SparseBackoffTree [] sbt = this._topicGivenWord;
+		SparseBackoffTreeStructure struct = this._struct;
+		_topicGivenWord = null;
+		_struct = null;
+		ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(outFile));
+		oos.writeObject(this);
+		oos.close();
+		_topicGivenWord = sbt;
+		_struct = struct;
+	}
 	
-	public static int train(String inputFile, String outputFile, String configFile) throws Exception {
+	public static SBTDocumentModel readModel(String inFile) throws Exception {
+		ObjectInputStream ois = new ObjectInputStream(new FileInputStream(inFile));
+		SBTDocumentModel out = (SBTDocumentModel) ois.readObject();
+		ois.close();
+		out._struct = new SparseBackoffTreeStructure(out._branchingFactors);
+		out.updateWordParamsFromZs(interpolateEndPoints(out._wordsDeltaEndPts, out._branchingFactors.length));
+		return out;
+	}
+	
+	public static void train(String inputFile, String outputFile, String configFile) throws Exception {
 		SBTDocumentModel sbtdm = new SBTDocumentModel(configFile);
 		sbtdm.initializeForCorpus(inputFile, sbtdm._struct.numLeaves());
 		sbtdm.trainModel(sbtdm._NUMITERATIONS, sbtdm._OPTIMIZEINTERVAL);
 		sbtdm.writeModel(outputFile);
 	}
 	
-	public static int test(String modelFile, String inputFile) {
-		
+	public static double test(String modelFile, String inputFile) {
+		return -1.0;
 	}
 	
 	public static void main(String[] args) {

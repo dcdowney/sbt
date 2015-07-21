@@ -9,7 +9,7 @@ public class SBTSubtractor {
 	public int [] _localIdx;
 	
 	//NOTE!!  Performs an approximation to the true subtraction, because takes from leaf-most smoothers even if not all contributed by the skipLeaf 
-	public SBTSubtractor(SparseBackoffTree sbt, int skipLeaf) {
+	public SBTSubtractor(SparseBackoffTree sbt, int skipLeaf, double amountToSubtract) {
 		_leafIdx = skipLeaf;
 
 		SparseBackoffTreeStructure struct = sbt._struct;
@@ -19,19 +19,19 @@ public class SBTSubtractor {
 		
 		_smoother = new double[curSmoothers.length];
 		_total = new double[curTotals.length];
-		if(curTotals[curTotals.length - 1] < 1.0) {
+		if(curTotals[curTotals.length - 1] < amountToSubtract) {
 			double amtSubtracted = curTotals[curTotals.length - 1];
 			_total[curTotals.length - 1] = amtSubtracted;
 			for(int i=_total.length - 2; i >=0; i--) {
-				if(amtSubtracted < 1.0) {
-					_smoother[i] = Math.min(Math.min(1.0 - amtSubtracted, curTotals[i]), curSmoothers[i]);
+				if(amtSubtracted < amountToSubtract) {
+					_smoother[i] = Math.min(Math.min(amountToSubtract - amtSubtracted, curTotals[i]), curSmoothers[i]);
 					amtSubtracted += _smoother[i];
 				}
 				_total[i] = amtSubtracted;
 			}
 		}
 		else {
-			Arrays.fill(_total, 1.0); //subtract 1.0 from leaf
+			Arrays.fill(_total, amountToSubtract); //subtract from leaf
 		}
 		//normalize smoothers to be per-leaf
 		for(int i=0; i<_smoother.length - 1;i++) {
@@ -41,12 +41,12 @@ public class SBTSubtractor {
 		_smoother[_smoother.length - 1] /= struct.numLeaves();
 	}
 	
-	public static SBTSubtractor [] getSubs(SparseBackoffTree [] sbts, int skipLeaf) {
+	public static SBTSubtractor [] getSubs(SparseBackoffTree [] sbts, int skipLeaf, double [] amountsToSubtract) {
 		if(skipLeaf < 0)
 			return null;
 		SBTSubtractor [] out = new SBTSubtractor[sbts.length];
 		for(int i=0; i<sbts.length; i++) {
-			out[i] = new SBTSubtractor(sbts[i], skipLeaf);
+			out[i] = new SBTSubtractor(sbts[i], skipLeaf, amountsToSubtract[i]);
 		}
 		return out;
 	}

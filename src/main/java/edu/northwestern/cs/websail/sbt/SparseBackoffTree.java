@@ -1,4 +1,6 @@
 package edu.northwestern.cs.websail.sbt;
+import gnu.trove.iterator.TIntDoubleIterator;
+import gnu.trove.map.hash.TIntDoubleHashMap;
 import gnu.trove.map.hash.TIntIntHashMap;
 
 import java.util.Random;
@@ -88,6 +90,14 @@ public class SparseBackoffTree {
 			_children[j] = new SparseBackoffTree(_struct._children[j]);
 		}
 		_children[j].addMass(res, d);
+	}
+	
+	public void addAllMass(TIntDoubleHashMap hm) {
+		TIntDoubleIterator it = hm.iterator();
+		while(it.hasNext()) {
+			it.advance();
+			addMass(it.key(), it.value());
+		}
 	}
 	
 	public static SparseBackoffTree sum(SparseBackoffTree [] sbts, SparseBackoffTreeStructure struct) {
@@ -287,9 +297,9 @@ public class SparseBackoffTree {
 		sbt.smoothAndAddMass(3, 2.0, ds);
 		sbt.smoothAndAddMass(4, 1.0, ds);
 		sbt.smoothAndAddMass(11, 1.0, ds);
-		SBTSubtractor sub = new SBTSubtractor(sbt, 0);
+		SBTSubtractor sub = new SBTSubtractor(sbt, 0, 1.0);
 		System.out.println("sbt mass: " + sbt._totalMass);
-		TIntIntHashMap hm = sbt.sampleSet(400000, sub);
+		TIntIntHashMap hm = sbt.sampleSet(800000, sub);
 		System.out.println(hm.toString());
 	}
 	
@@ -301,12 +311,12 @@ public class SparseBackoffTree {
 		SparseBackoffTreeStructure struct = new SparseBackoffTreeStructure(new int [] {2, 2, 3});
 		SparseBackoffTree sbt = new SparseBackoffTree(struct);
 		double [] ds = new double [] {0.24, 0.36, 0.3};
-		sbt.smoothAndAddMass(0, 1.0, ds);
+		//sbt.smoothAndAddMass(0, 1.0, ds);
 		sbt.smoothAndAddMass(3, 2.0, ds);
 		sbt.smoothAndAddMass(4, 1.0, ds);
 		sbt.smoothAndAddMass(11, 1.0, ds);
 		System.out.println("sbt mass: " + sbt._totalMass);
-		TIntIntHashMap hm = sbt.sampleSet(500000, null);
+		TIntIntHashMap hm = sbt.sampleSet(400000, null);
 		System.out.println(hm.toString());
 		testSubtraction();
 	}
