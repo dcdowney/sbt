@@ -6,6 +6,7 @@ import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.io.Serializable;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -19,9 +20,14 @@ import gnu.trove.iterator.TIntIterator;
 import gnu.trove.list.array.TIntArrayList;
 import gnu.trove.map.hash.TIntDoubleHashMap;
 
-public class SBTDocumentModel {
+public class SBTDocumentModel implements Serializable {
 
-    private class GibbsDoer implements Runnable {
+    /**
+	 * 
+	 */
+	private static final long serialVersionUID = 1L;
+
+	private class GibbsDoer implements Runnable {
     	int _start;
     	int _end;
     	int _changes = 0;
@@ -37,8 +43,8 @@ public class SBTDocumentModel {
 	private int _VOCABSIZE = -1;  
 	private int _NUMDOCS = -1;
 	private int _NUMTOKENS = -1;
-	TIntArrayList [] _docs = new TIntArrayList[_NUMDOCS]; //the words
-	TIntArrayList [] _z = new TIntArrayList[_NUMDOCS]; //the topic variable assignments
+	TIntArrayList [] _docs; //the words
+	TIntArrayList [] _z; //the topic variable assignments
 	double [] _pWord; //marginal word prob
 
 	//Model information:
@@ -131,28 +137,56 @@ public class SBTDocumentModel {
 		this._OPTIMIZEINTERVAL = _OPTIMIZEINTERVAL;
 	}
 
+	private void setThreadBreaks() {
+		_THREADBREAKS = new int[_NUMTHREADS];
+		int approxToks = _NUMTOKENS / _NUMTHREADS;
+		int ct = 0;
+		int thread = 0;
+		for(int i=0; i<_NUMDOCS; i++ ) {
+			ct += _docs[i].size();
+			if(ct > approxToks) {
+				_THREADBREAKS[thread++] = i;
+				ct = 0;
+			}
+		}
+		//extra goes in last thread:
+		_THREADBREAKS[_NUMTHREADS - 1] = _NUMDOCS - 1;
+	}
 
 	//config file has lines of form <param-name without underscore>\t<integer value> [<integer value> ...]
 	public void readConfigFile(String inFile) throws Exception {
+		System.out.println("reading config file.");
 		BufferedReader brIn = new BufferedReader(
 				new InputStreamReader(new FileInputStream(inFile), "UTF8" ));
 		String sLine;
+		Method [] ms = this.getClass().getMethods();
 		while((sLine = brIn.readLine())!=null) {
 			if(sLine.startsWith("#"))
 				continue;
+			System.out.println(sLine);
 			String [] fields = sLine.split("\t");
-			Method m = this.getClass().getMethod("set_" + fields[0], new Class<?>[0]);
-			Class<?> c = m.getParameters()[0].getClass();
-			if(c.getName().equals("java.lang.Integer")) {
+			//HACK; this only works given the get/set naming convention
+			Method m = null;
+			for(int i=0; i<ms.length; i++) {
+				if(ms[i].getName().equals("set_" + fields[0])) {
+					m = ms[i];
+					break;
+				}
+			}
+			Class<?> c = m.getParameterTypes()[0];
+			if(c.getName().equals("int")) {
 				int arg = Integer.parseInt(fields[1]);
+				System.out.println(m.getName() + "\t" + arg);
 				m.invoke(this, arg);
 			}
-			else if(c.isArray() && c.getComponentType().getName().equals("java.lang.Integer")) {
+			else if(c.isArray() && c.getComponentType().getName().equals("int")) {
 				String [] vals = fields[1].split(" ");
 				int [] arg = new int[vals.length];
 				for(int i=0; i<arg.length; i++) {
 					arg[i] = Integer.parseInt(vals[i]);
 				}
+				System.out.println(m.getName() + "\t" + Arrays.toString(arg));
+				m.invoke(this, arg);
 			}
 		}
 		brIn.close();
@@ -244,6 +278,7 @@ public class SBTDocumentModel {
 		_NUMTOKENS = toks;
 		_NUMDOCS = aldocs.size();
 		_docs = aldocs.toArray(new TIntArrayList[aldocs.size()]);
+		setThreadBreaks();
 		return i;
 	}
 	
@@ -267,11 +302,15 @@ public class SBTDocumentModel {
 			for(int j=0; j<_z[i].size(); j++) {
 				int wordID = _docs[i].get(j);
 				int z = _z[i].get(j);
+				if(hm[wordID] == null)
+					hm[wordID] = new TIntDoubleHashMap();
 				hm[wordID].adjustOrPutValue(z, 1.0, 1.0);
 			}
 		}
 		//add:
 		for(int i=0; i<_VOCABSIZE; i++) {
+			if(hm[i] == null)
+				continue;
 			TIntDoubleIterator it = hm[i].iterator();
 			while(it.hasNext()) {
 				it.advance();
@@ -420,15 +459,16 @@ public class SBTDocumentModel {
 		return -1.0;
 	}
 	
-	public static void main(String[] args) {
+	public static void main(String[] args) throws Exception {
 		if(args.length > 0 && args[0].equalsIgnoreCase("train")) {
-			if(args.length != 3) {
+			if(args.length != 4) {
 				System.err.println("Usage: SBTDocumentModel train <input_file> <model_output_file> <configuration_file>");
 				return;
 			}
+			train(args[1], args[2], args[3]);
 		}
 		else if(args.length > 0 && args[0].equalsIgnoreCase("test")) {
-			if(args.length != 2) {
+			if(args.length != 3) {
 				System.err.println("Usage: SBTDocumentModel test <model_file> <test_file>");
 			}
 		}
