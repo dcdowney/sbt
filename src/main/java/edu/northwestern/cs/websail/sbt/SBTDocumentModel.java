@@ -53,8 +53,8 @@ public class SBTDocumentModel implements Serializable {
 	//SparseBackoffTree [] _topicGivenDoc = null;
 	SparseBackoffTree [] _topicGivenWord = null; 
 	double [] _topicMarginal;
-	double [] _docsDeltaEndPts = new double [] {0.1, 0.1};
-	double [] _wordsDeltaEndPts = new double [] {0.1, 0.1};
+	double [] _docsDeltaEndPts = new double [] {0.3, 0.3};
+	double [] _wordsDeltaEndPts = new double [] {0.3, 0.3};
 	
 	//threading:
 	private int _NUMTHREADS = -1;
@@ -206,15 +206,17 @@ public class SBTDocumentModel implements Serializable {
 	//returns number of changes
 	private int sampleDoc(int docId) {
 		int changes = 0;
+		TIntArrayList zs = _z[docId];
 		TIntArrayList doc = _docs[docId];
-		TIntDoubleHashMap docCts = aggregateCounts(doc);
+		TIntDoubleHashMap docCts = aggregateCounts(zs);
 		SparseBackoffTree sbtDoc = new SparseBackoffTree(_struct);
+		//System.out.println("adding " + docCts.toString());
 		sbtDoc.addAllMass(docCts);
 		for(int i=0; i<doc.size(); i++) {
 			int newZ = sampleZ(docId, i, false, sbtDoc);
-			if(newZ != doc.get(i))
+			if(newZ != zs.get(i))
 				changes++;
-			doc.set(i, newZ);
+			zs.set(i, newZ);
 		}
 		return changes;
 	}
@@ -334,7 +336,8 @@ public class SBTDocumentModel implements Serializable {
 	public int initializeForCorpus(String inFile, int maxVal) throws Exception {
 		int toks = readCorpusDat(inFile);
 		initZRandom(_docs, maxVal);
-		updateWordParamsFromZs(interpolateEndPoints(this._wordsDeltaEndPts, _branchingFactors.length));
+		updateModel();
+		//updateWordParamsFromZs(interpolateEndPoints(this._wordsDeltaEndPts, _branchingFactors.length));
 		return toks;
 	}
 	
@@ -365,7 +368,8 @@ public class SBTDocumentModel implements Serializable {
     			changes += gds[i]._changes;
     		}
     	stTime = System.currentTimeMillis() - stTime;
-    	System.out.print("\ttime: " + stTime + "\tchanges: " + changes);
+    	System.out.println("\ttime: " + stTime + "\tchanges: " + changes);
+    	System.out.println(Arrays.toString(_topicMarginal));
     	return changes;
     }
 	
@@ -384,11 +388,11 @@ public class SBTDocumentModel implements Serializable {
 		double sumSmoother = 0.0f;
 		for(int i=0; i<numStates; i++) {
 			double [] smoothAndCount = shdAgg.getSmoothAndCount(i);
-			smoothing[i] = smoothAndCount[i];
+			smoothing[i] = smoothAndCount[0];
 			if(smoothing[i] > maxSmooth) {
 				maxSmooth = smoothing[i];
 			}
-			count[i] = smoothAndCount[i];
+			count[i] = smoothAndCount[1];
 			sumCount += count[i];
 			sumSmoother += smoothing[i];
 		}
@@ -403,7 +407,7 @@ public class SBTDocumentModel implements Serializable {
 	}
 	
     public void updateModel() {
-		
+		System.out.println("first doc samples: " + _z[0].toString());
     	this.updateWordParamsFromZs(this.interpolateEndPoints(_wordsDeltaEndPts, _branchingFactors.length));
     	
 		_topicMarginal = getNormalizers(_topicGivenWord, _struct);

@@ -86,6 +86,8 @@ public class SparseBackoffTree {
 		int res = locidx[1];
 		_childMass[j] += d;
 		_totalMass += d;
+		if(_children == null)
+			return;
 		if(_children[j] == null) {
 			_children[j] = new SparseBackoffTree(_struct._children[j]);
 		}
@@ -117,7 +119,9 @@ public class SparseBackoffTree {
 			this._delta += sbt._delta;
 			for(int i=0; i<this._childMass.length; i++) {
 				this._childMass[i] += sbt._childMass[i];
-				if(sbt._children[i] != null) {
+				if(sbt._children != null) {
+//					if(this._children == null)
+//						this._children= new SparseBackoffTree [sbt._children.length];
 					if(this._children[i] == null) {
 						this._children[i] = new SparseBackoffTree(this._struct._children[i]);
 					}
@@ -261,10 +265,12 @@ public class SparseBackoffTree {
 		int [] localIdxTrace = _struct.getLocalIdxTrace(leafIdx);
 		double [] out = new double[2];
 		SparseBackoffTree sbt = this;
-		for(int i=0; i<localIdxTrace.length + 1; i++) {
+		for(int i=0; i<localIdxTrace.length; i++) {
 			out[0] += sbt._smooth;
-			if(i < out.length - 1)
+			if(i < localIdxTrace.length - 1)
 				sbt = sbt._children[localIdxTrace[i]];
+			else
+				out[1] = sbt._childMass[localIdxTrace[i]];
 		}
 		return out;
 	}
@@ -281,12 +287,30 @@ public class SparseBackoffTree {
 					_childMass[i] /= n;
 				}
 				else {
-					_childMass[i] = divideCountsBy(norm);
+					_childMass[i] = _children[i].divideCountsBy(norm);
 				}
 				_totalMass -= (prev - _childMass[i]);
 			}
 		}
 		return _totalMass;
+	}
+	
+	public static void testDivision() {
+		double [] ds = new double [] {0.24, 0.36, 0.3};
+		SparseBackoffTreeStructure struct = new SparseBackoffTreeStructure(new int [] {2, 2, 3}, ds);
+		SparseBackoffTree sbt = new SparseBackoffTree(struct);
+		sbt.smoothAndAddMass(0, 1.0, ds);
+		sbt.smoothAndAddMass(3, 2.0, ds);
+		sbt.smoothAndAddMass(4, 1.0, ds);
+		sbt.smoothAndAddMass(11, 1.0, ds);
+		System.out.println("sbt mass: " + sbt._totalMass);
+		sbt.divideCountsBy(new double [] {1.0, 2.0, 1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0});
+		System.out.println("sbt mass after: " + sbt._totalMass + " should be 4.45");
+		TIntIntHashMap hm = sbt.sampleSet(445000, null);
+		System.out.println(hm.toString());
+		System.out.println(hm.get(1) + " should be about 36000");
+		System.out.println(hm.get(3) + " should be about 101000");
+		
 	}
 	
 	public static void testSubtraction() {
@@ -299,7 +323,7 @@ public class SparseBackoffTree {
 		sbt.smoothAndAddMass(11, 1.0, ds);
 		SBTSubtractor sub = new SBTSubtractor(sbt, 0, 1.0);
 		System.out.println("sbt mass: " + sbt._totalMass);
-		TIntIntHashMap hm = sbt.sampleSet(800000, sub);
+		TIntIntHashMap hm = sbt.sampleSet(500000, sub);
 		System.out.println(hm.toString());
 	}
 	
@@ -311,13 +335,14 @@ public class SparseBackoffTree {
 		SparseBackoffTreeStructure struct = new SparseBackoffTreeStructure(new int [] {2, 2, 3});
 		SparseBackoffTree sbt = new SparseBackoffTree(struct);
 		double [] ds = new double [] {0.24, 0.36, 0.3};
-		//sbt.smoothAndAddMass(0, 1.0, ds);
+		sbt.smoothAndAddMass(0, 1.0, ds);
 		sbt.smoothAndAddMass(3, 2.0, ds);
 		sbt.smoothAndAddMass(4, 1.0, ds);
 		sbt.smoothAndAddMass(11, 1.0, ds);
 		System.out.println("sbt mass: " + sbt._totalMass);
-		TIntIntHashMap hm = sbt.sampleSet(400000, null);
+		TIntIntHashMap hm = sbt.sampleSet(500000, null);
 		System.out.println(hm.toString());
 		testSubtraction();
+		testDivision();
 	}
 }
