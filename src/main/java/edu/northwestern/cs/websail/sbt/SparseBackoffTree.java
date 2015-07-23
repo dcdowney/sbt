@@ -3,6 +3,7 @@ import gnu.trove.iterator.TIntDoubleIterator;
 import gnu.trove.map.hash.TIntDoubleHashMap;
 import gnu.trove.map.hash.TIntIntHashMap;
 
+import java.util.Arrays;
 import java.util.Random;
 
 
@@ -262,6 +263,8 @@ public class SparseBackoffTree {
 		SparseBackoffTree sbt = this;
 		out[0] = sbt._totalMass;
 		for(int i=0; i<out.length - 1; i++) {
+			if(sbt == null)
+				System.err.println("null");
 			out[i+1] = sbt._childMass[localIdxTrace[i]];
 			if(i < out.length - 2)
 				sbt = sbt._children[localIdxTrace[i]];
@@ -275,11 +278,14 @@ public class SparseBackoffTree {
 		double [] out = new double[2];
 		SparseBackoffTree sbt = this;
 		for(int i=0; i<localIdxTrace.length; i++) {
+			if(sbt == null)
+				break;
 			out[0] += sbt._smooth;
 			if(i < localIdxTrace.length - 1)
 				sbt = sbt._children[localIdxTrace[i]];
-			else
+			else {
 				out[1] = sbt._childMass[localIdxTrace[i]];
+			}
 		}
 		return out;
 	}
@@ -336,6 +342,18 @@ public class SparseBackoffTree {
 		System.out.println(hm.toString());
 	}
 	
+	public static void testGetSmoothAndCount() {
+		double [] ds = new double [] {0.24, 0.36, 0.3};
+		SparseBackoffTreeStructure struct = new SparseBackoffTreeStructure(new int [] {2, 2, 3}, ds);
+		SparseBackoffTree sbt = new SparseBackoffTree(struct);
+		sbt.smoothAndAddMass(0, 1.0, ds);
+		sbt.smoothAndAddMass(3, 2.0, ds);
+		sbt.smoothAndAddMass(4, 1.0, ds);
+		sbt.smoothAndAddMass(11, 1.0, ds);
+		double [] sac = sbt.getSmoothAndCount(3);
+		System.out.println("should be {0.46, 1.1} " + Arrays.toString(sac));
+	}
+	
 	/**
 	 * @param args
 	 */
@@ -353,5 +371,6 @@ public class SparseBackoffTree {
 		System.out.println(hm.toString());
 		testSubtraction();
 		testDivision();
+		testGetSmoothAndCount();
 	}
 }

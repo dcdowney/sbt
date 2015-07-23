@@ -16,7 +16,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import SparseHierarchicalLDA.TestDoer;
 import gnu.trove.iterator.TIntDoubleIterator;
 import gnu.trove.iterator.TIntIterator;
 import gnu.trove.list.array.TIntArrayList;
@@ -42,22 +41,17 @@ public class SBTDocumentModel implements Serializable {
     private class TestDoer implements Runnable {
     	int _doc;
     	double [] _ds;
-    	double [] _docTopicMarginal;
     	double [] _wordTopicMarginal;
-    	boolean _uniqueObsv;
     	double [] _res;
     	
-    	public TestDoer(int i, double [] ds, double [] docTopicMarginal, double [] wordTopicMarginal,
-    			boolean uniqueObsv) {
+    	public TestDoer(int i, double [] ds, double [] wordTopicMarginal) {
     		_doc = i;
     		_ds = ds;
-    		_docTopicMarginal = docTopicMarginal;
     		_wordTopicMarginal = wordTopicMarginal;
-    		_uniqueObsv = uniqueObsv;
     	}
     	
     	public void run() {
-    		_res = testOnDocFullPpl(_doc, _ds, _docTopicMarginal, _wordTopicMarginal);
+    		_res = testOnDocFullPpl(_doc, _ds, _wordTopicMarginal);
     		System.out.println(_doc + "\t" + _res[0] + "\t" + _res[1]);
     	}
     }
@@ -78,8 +72,8 @@ public class SBTDocumentModel implements Serializable {
 	//SparseBackoffTree [] _topicGivenDoc = null;
 	SparseBackoffTree [] _topicGivenWord = null; 
 	double [] _topicMarginal;
-	double [] _docsDeltaEndPts = new double [] {0.1, 0.3};
-	double [] _wordsDeltaEndPts = new double [] {0.1, 0.3};
+	double [] _docsDeltaEndPts = new double [] {0.3, 0.3};
+	double [] _wordsDeltaEndPts = new double [] {0.3, 0.3};
 	
 	//threading:
 	private int _NUMTHREADS = -1;
@@ -288,26 +282,59 @@ public class SBTDocumentModel implements Serializable {
 		return al;
 	}
 	
+	
 	//returns number of docs
-	public int readCorpusDat(String inFile) throws Exception {
+	public int readCorpusDat(String inFile, boolean updatePWord) throws Exception {
 		BufferedReader brIn = new BufferedReader(
 				new InputStreamReader(new FileInputStream(inFile), "UTF8" ));
 		String sLine;
 		int i=0;
 		int toks = 0;
 		ArrayList<TIntArrayList> aldocs = new ArrayList<TIntArrayList>();
+		if (updatePWord)
+			_pWord = new double[_VOCABSIZE];
 		while((sLine = brIn.readLine())!=null) {
 			TIntArrayList ll = lineToList(sLine);
 			aldocs.add(ll);
+			if (updatePWord) {
+				TIntIterator it = ll.iterator();
+				while(it.hasNext()) {
+					_pWord[it.next()]++;
+				}
+			}
 			toks += ll.size();
 		}
 		brIn.close();
 		System.out.println("Tokens: " + toks);
 		_NUMTOKENS = toks;
+		double dubToks = (double)toks;
+		if(updatePWord)
+			for(int j=0; j<_pWord.length; j++)
+				if(_pWord[j]>0.0)
+					_pWord[j] /= dubToks;
 		_NUMDOCS = aldocs.size();
 		_docs = aldocs.toArray(new TIntArrayList[aldocs.size()]);
 		setThreadBreaks();
 		return i;
+	}
+	
+	//keeps word distributions, but re-sets docs, counts, and z's for new corpus
+	//takes in number of docs in new corpus
+	//keeps topicMarginal and _pWord fixed
+	public void reInitForCorpus(String testFile, int numDocs) throws Exception {
+		_docs = new TIntArrayList[numDocs];
+		_NUMDOCS = numDocs;
+		this.readCorpusDat(testFile, false);
+		_z = new TIntArrayList[numDocs];
+		for(int i=0; i<_docs.length; i++) {
+			_z[i] = new TIntArrayList(_docs[i].size());
+			for(int j=0; j<_docs[i].size(); j++) {
+				int w = _docs[i].get(j);
+				int r = -1;
+				_z[i].add(r);
+			}
+		}
+		setThreadBreaks();
 	}
 	
 	public void initZRandom(TIntArrayList [] ds, int maxVal) {
@@ -360,7 +387,7 @@ public class SBTDocumentModel implements Serializable {
 	
 	//reads the corpus and initializes zs and model
 	public int initializeForCorpus(String inFile, int maxVal) throws Exception {
-		int toks = readCorpusDat(inFile);
+		int toks = readCorpusDat(inFile, true);
 		initZRandom(_docs, maxVal);
 		updateModel();
 		//updateWordParamsFromZs(interpolateEndPoints(this._wordsDeltaEndPts, _branchingFactors.length));
@@ -432,6 +459,22 @@ public class SBTDocumentModel implements Serializable {
 		return out;
 	}
 	
+	
+	
+	public static double [] getCheckMarginal(SparseBackoffTree [] shds, SparseBackoffTreeStructure struct) {
+		int numStates = struct.numLeaves();
+		double [] out = new double[numStates];
+		SparseBackoffTree shdAgg = SparseBackoffTree.sum(shds, struct);
+		double maxSmooth = 0.0f;
+		double sumCount = 0.0f;
+		double sumSmoother = 0.0f;
+		for(int i=0; i<numStates; i++) {
+			double [] smoothAndCount = shdAgg.getSmoothAndCount(i);
+			out[i] += smoothAndCount[0] + smoothAndCount[1];
+		}
+		return out;
+	}
+	
     public void updateModel() {
 		System.out.println("first doc samples: " + _z[0].toString());
     	this.updateWordParamsFromZs(this.interpolateEndPoints(_wordsDeltaEndPts, _branchingFactors.length));
@@ -444,10 +487,10 @@ public class SBTDocumentModel implements Serializable {
     
     public void optimizeParameters() {
     	System.out.println("here is where we would optimize parameters.");
-    	this._docsDeltaEndPts[0] *= 0.8;
-    	this._docsDeltaEndPts[1] *= 0.90;
-    	this._wordsDeltaEndPts[0] *= 0.8;
-    	this._wordsDeltaEndPts[1] *= 0.90;
+    	this._docsDeltaEndPts[0] *= 0.7;
+    	this._docsDeltaEndPts[1] *= 0.85;
+    	this._wordsDeltaEndPts[0] *= 0.7;
+    	this._wordsDeltaEndPts[1] *= 0.85;
     }
     
 	public void trainModel(int iterations, int updateInterval) {
@@ -479,12 +522,12 @@ public class SBTDocumentModel implements Serializable {
 		SBTDocumentModel out = (SBTDocumentModel) ois.readObject();
 		ois.close();
 		out._struct = new SparseBackoffTreeStructure(out._branchingFactors);
-		out.updateWordParamsFromZs(interpolateEndPoints(out._wordsDeltaEndPts, out._branchingFactors.length));
+		out.updateModel();
+		//out.updateWordParamsFromZs(interpolateEndPoints(out._wordsDeltaEndPts, out._branchingFactors.length));
 		return out;
 	}
 	
-	public double [] testOnDocFullPpl(int doc, double [] ds, 
-			double [] docTopicMarginal, double [] wordTopicMarginal) {
+	public double [] testOnDocFullPpl(int doc, double [] ds, double [] wordTopicMarginal) {
 		boolean CHECKSUMTOONE = false;
 		double LL = 0.0;
 		double numWords = 0.0;
@@ -507,6 +550,13 @@ public class SBTDocumentModel implements Serializable {
 				double p = 0.0;
 				//only compute for seen words:
 				if(_pWord[w] > 0) {
+					//init topicGivenDoc with all samples:
+					topicGivenDoc = new SparseBackoffTree(_struct);
+					for(int k =0; k<_z[doc].size(); k++) {
+						int r = _z[doc].get(k);
+						if(r != -1)
+							topicGivenDoc.smoothAndAddMass(r, 1.0, ds);
+					}
 						//resample everything before:
 					for(int k=0; k<i; k++) {
 						int wkidx = wordOrder.get(k);
@@ -514,12 +564,6 @@ public class SBTDocumentModel implements Serializable {
 							int r = sampleZ(doc, wkidx, true, topicGivenDoc);
 							_z[doc].set(wkidx, r);
 						}
-					}
-					topicGivenDoc = new SparseBackoffTree(_struct);
-					for(int k =0; k<_z[doc].size(); k++) {
-						int r = _z[doc].get(k);
-						if(r != -1)
-							topicGivenDoc.smoothAndAddMass(r, 1.0, ds);
 					}
 
 					//test on this word:
@@ -568,15 +612,15 @@ public class SBTDocumentModel implements Serializable {
 					if(numWords>0)
 						r = sampleZ(doc, widx, true, topicGivenDoc);
 					else
-						r = _topicGivenWord[w].sample(_r, null);
-					//TODO: make this less wildly inefficient
-					topicGivenDoc = new SparseBackoffTree(_struct);
+						r = _topicGivenWord[w].sample(_r);
 					_z[doc].set(widx, r);
-					for(int k =0; k<_z[doc].size(); k++) {
-						r = _z[doc].get(k);
-						if(r != -1)
-							topicGivenDoc.smoothAndAddMass(r, 1.0, ds);
-					}
+					//TODO: make this less wildly inefficient
+//					topicGivenDoc = new SparseBackoffTree(_struct);
+//					for(int k =0; k<_z[doc].size(); k++) {
+//						r = _z[doc].get(k);
+//						if(r != -1)
+//							topicGivenDoc.smoothAndAddMass(r, 1.0, ds);
+//					}
 					numWords++;
 				}
 			}
@@ -607,39 +651,19 @@ public class SBTDocumentModel implements Serializable {
 	//returns {ppl, number of tested words}
 	//numDocs is number in test file
 	public static double [] testModel(String modelFile, String testFile, int numDocs, int maxDocs) throws Exception {
-		boolean CHECKWORDDISTRIBUTION = false;
+		boolean CHECKWORDDISTRIBUTION = true;
 		
 		SBTDocumentModel sbtdm = readModel(modelFile);
 		double [] ds = interpolateEndPoints(sbtdm._docsDeltaEndPts, sbtdm._branchingFactors.length);
-		float numWordTrainToks = sbtdm.getDistributionTokens();
-		float [] wordTopicMarginal = new float[shlda._topicMarginal[shlda._topicMarginal.length - 1].length];
-		float [] docTopicMarginal = new float[shlda._topicMarginal[shlda._topicMarginal.length - 1].length];
-		shlda.copyInto(shlda._topicMarginal[shlda._topicMarginal.length - 1], docTopicMarginal, false);
-		int numStates = wordTopicMarginal.length;
+		double numWordTrainToks = (double)sbtdm._NUMTOKENS;
+		double [] wordTopicNormalizer = getCheckMarginal(sbtdm._topicGivenWord, sbtdm._struct); 
+		int numStates = wordTopicNormalizer.length;
 
-		//new code here:
-		float [][] temp = new float[shlda._topicMarginal.length][];
-		//temp = getTopicMarginal(shlda._topicGivenWord);
-		//shlda._topicMarginal[shlda._topicMarginal.length - 1] = getNormalizers(shlda._topicGivenWord);
-		//shlda.divideMarginal(shlda._topicGivenWord);
-		temp = getTopicMarginal(shlda._topicGivenWord);
-		//temp[temp.length-1] = getNormalizers(shlda._topicGivenWord, shlda._NUMTOKENS/numStates);
-		
-		shlda.copyInto(temp[temp.length-1], wordTopicMarginal, false);
-		
-		//change marginals to be on count basis rather than avg to one:
-		float docNorm = shlda._NUMTOKENS / wordTopicMarginal.length;
-		float wordNorm = numWordTrainToks / wordTopicMarginal.length;
-		for(int i=0; i<wordTopicMarginal.length; i++) {
-			wordTopicMarginal[i] *= wordNorm;
-			docTopicMarginal[i] *= docNorm;
-		}
-		
-		float [] pWordGivenState = new float[wordTopicMarginal.length] ; 
+		float [] pWordGivenState = new float[wordTopicNormalizer.length] ; 
 		if(CHECKWORDDISTRIBUTION) {
-			for(int w=0; w<shlda._topicGivenWord.length; w++) {
-				for(int t=0;t<wordTopicMarginal.length; t++) {
-					pWordGivenState[t] += shlda._topicGivenWord[w].getSmoothed(t) / wordTopicMarginal[t];
+			for(int w=0; w<sbtdm._topicGivenWord.length; w++) {
+				for(int t=0;t<wordTopicNormalizer.length; t++) {
+					pWordGivenState[t] += sbtdm._topicGivenWord[w].getSmoothed(t) / wordTopicNormalizer[t];
 				}
 			}
 			float sum = 0.0f;
@@ -647,61 +671,47 @@ public class SBTDocumentModel implements Serializable {
 				sum += pWordGivenState[i];
 			}
 			
-			System.out.println("Word sum: " + sum);
+			System.out.println("Word sum: " + sum + " should be about " + numStates);
 		}
 
-		//set back topicMarginal for later use:
-		//shlda.copyInto(temp, shlda._topicMarginal[shlda._topicMarginal.length - 1], false);
-		
-		shlda.reInitForCorpus(testFile, numDocs);
+		sbtdm.reInitForCorpus(testFile, numDocs);
 		double LL = 0.0;
 		double numWords = 0.0;
 		double origWords = 0.0;
-		if(multiThread) {
-			TestDoer [] tds = new TestDoer[maxDocs];
-    		ExecutorService e = Executors.newFixedThreadPool(_NUMCORES);
-    		for(int i=0; i<tds.length;i++) {
-    			if(shlda._docs[i].size() > 2000) {
-    				System.out.println("skipping " + i);
-    				continue;
-    			}
-    			tds[i] = shlda.new TestDoer(i, ds, docTopicMarginal, wordTopicMarginal, uniqueObsv);
-    			e.execute(tds[i]);
-    		}
-    		e.shutdown();
-    		boolean terminated = false;
-    		while(!terminated) {
-	    		try {
-	    			terminated = e.awaitTermination(60,  TimeUnit.SECONDS);
-	    		}
-	    		catch (InterruptedException ie) {
-	    			
-	    		}
-    		}
-    		for(int i=0; i<tds.length; i++) {
-    			if(tds[i]==null)
-    				continue;
-    			LL += tds[i]._res[0];
-    			numWords += tds[i]._res[1];
-    		}
-    	}
-		else {
-			for(int i=0; i<shlda._docs.length; i++) {
-				double [] res = shlda.testOnDocFullPpl(i, ds, docTopicMarginal, wordTopicMarginal, uniqueObsv);
-				LL += res[0];
-				numWords += res[1];
-				System.out.println(i + ". " + res[0] + " " + res[1]);
-				origWords += shlda._docs[i].size();
-				if(i >= maxDocs)
-					break;
+		TestDoer [] tds = new TestDoer[maxDocs];
+		ExecutorService e = Executors.newFixedThreadPool(sbtdm._NUMTHREADS);
+		//ExecutorService e = Executors.newFixedThreadPool(1);
+		for(int i=0; i<tds.length;i++) {
+			if(sbtdm._docs[i].size() > 2000) {
+				System.out.println("skipping " + i);
+				continue;
 			}
+			tds[i] = sbtdm.new TestDoer(i, ds, wordTopicNormalizer);
+			e.execute(tds[i]);
+		}
+		e.shutdown();
+		boolean terminated = false;
+		while(!terminated) {
+    		try {
+    			terminated = e.awaitTermination(60,  TimeUnit.SECONDS);
+    		}
+    		catch (InterruptedException ie) {
+    			
+    		}
+		}
+		for(int i=0; i<tds.length; i++) {
+			if(tds[i]==null)
+				continue;
+			LL += tds[i]._res[0];
+			numWords += tds[i]._res[1];
 		}
 		System.out.println("total orig words: " + origWords);
 		return new double [] {LL, numWords};
 	}
 	
-	public static double test(String modelFile, String inputFile) {
-		return -1.0;
+	public static void test(String modelFile, String inputFile, int numDocsInFile, int numDocsToTest) throws Exception {
+		double [] ll = testModel(modelFile, inputFile, numDocsInFile, numDocsToTest);
+		System.out.println("Test ppl: " + Arrays.toString(ll));
 	}
 	
 	public static void main(String[] args) throws Exception {
@@ -713,9 +723,10 @@ public class SBTDocumentModel implements Serializable {
 			train(args[1], args[2], args[3]);
 		}
 		else if(args.length > 0 && args[0].equalsIgnoreCase("test")) {
-			if(args.length != 3) {
-				System.err.println("Usage: SBTDocumentModel test <model_file> <test_file>");
+			if(args.length != 5) {
+				System.err.println("Usage: SBTDocumentModel test <model_file> <test_file> <num_docs_in_file> <num_docs_to_test>");
 			}
+			test(args[1], args[2], Integer.parseInt(args[3]), Integer.parseInt(args[4]));
 		}
 		else {
 			System.err.println("Usage: SBTDocumentModel <train|test> <args...>");

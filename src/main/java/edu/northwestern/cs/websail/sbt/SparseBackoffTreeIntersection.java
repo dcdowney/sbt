@@ -69,7 +69,7 @@ public class SparseBackoffTreeIntersection {
 				}
 				_siblingSbtis[i] = new SparseBackoffTreeIntersection(sbtSubset, inSub, subSubset, subsIdx, i + smoothMin);
 				double smoothSubtract = 0.0;
-				if(inSub) {
+				if(inSub && subs[i] != null) { //subs[i] may be null if we've set subtract amt on this sbt to zero
 					smoothSubtract = subs[i]._smoother[subsIdx];
 				}
 				_siblingMass[i] = (_sbts[i + smoothMin]._smooth - smoothSubtract) * _siblingSbtis[i]._totalMass;
@@ -148,7 +148,7 @@ public class SparseBackoffTreeIntersection {
 				_totalMass -= _sbts[0]._smooth * _sbts[0]._struct.numLeaves();
 				_noTopSmooth = true;
 			}
-			if(inSub) {
+			if(inSub && subs[0] != null) { //subs[0] may be null if we've set subtract amt on this sbt to zero 
 				_totalMass -= subs[0]._total[subsIdx];
 				_childMass[subs[0]._localIdx[subsIdx]] -= subs[0]._total[subsIdx+1];
 			}
@@ -193,7 +193,7 @@ public class SparseBackoffTreeIntersection {
 			return _sbts[0]._struct.randomLeaf(r);
 		}
 		else {
-			if(subIdx >= 0)
+			if(subIdx >= 0 && _subs[0] != null)
 				return _sbts[0].sample(r, _subs[0], subIdx, _noTopSmooth);
 			else
 				return _sbts[0].sample(r, _noTopSmooth);

@@ -46,7 +46,8 @@ public class SBTSubtractor {
 			return null;
 		SBTSubtractor [] out = new SBTSubtractor[sbts.length];
 		for(int i=0; i<sbts.length; i++) {
-			out[i] = new SBTSubtractor(sbts[i], skipLeaf, amountsToSubtract[i]);
+			if(amountsToSubtract[i] > 0.0)
+				out[i] = new SBTSubtractor(sbts[i], skipLeaf, amountsToSubtract[i]);
 		}
 		return out;
 	}
