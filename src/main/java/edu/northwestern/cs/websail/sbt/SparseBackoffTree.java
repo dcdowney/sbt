@@ -37,6 +37,12 @@ public class SparseBackoffTree {
 		System.err.println("not implemented.");
 	}
 	
+	//returns unnormalized smoothed count at r.v. leaf value i
+	public double getSmoothed(int i) {
+		double [] sc = this.getSmoothAndCount(i);
+		return sc[0] + sc[1];
+	}
+	
 	//adds the given mass after applying the given discounts
 	//discounts are provided from shallowest level to deepest
 	//NOTE ignores the discounts in the sbt structure!!  Use with care.
@@ -94,11 +100,14 @@ public class SparseBackoffTree {
 		_children[j].addMass(res, d);
 	}
 	
-	public void addAllMass(TIntDoubleHashMap hm) {
+	public void addAllMass(TIntDoubleHashMap hm, double [] ds) {
 		TIntDoubleIterator it = hm.iterator();
 		while(it.hasNext()) {
 			it.advance();
-			addMass(it.key(), it.value());
+			if(ds == null)
+				addMass(it.key(), it.value());
+			else
+				smoothAndAddMass(it.key(), it.value(), ds);
 		}
 	}
 	
