@@ -72,8 +72,8 @@ public class SBTDocumentModel implements Serializable {
 	//SparseBackoffTree [] _topicGivenDoc = null;
 	SparseBackoffTree [] _topicGivenWord = null; 
 	double [] _topicMarginal;
-	double [] _docsDeltaEndPts = new double [] {0.3, 0.3};
-	double [] _wordsDeltaEndPts = new double [] {0.3, 0.3};
+	double [] _docsDeltaEndPts = new double [] {0.1, 0.1};
+	double [] _wordsDeltaEndPts = new double [] {0.1, 0.1};
 	
 	//threading:
 	private int _NUMTHREADS = -1;
@@ -488,9 +488,9 @@ public class SBTDocumentModel implements Serializable {
     public void optimizeParameters() {
     	System.out.println("here is where we would optimize parameters.");
     	this._docsDeltaEndPts[0] *= 0.7;
-    	this._docsDeltaEndPts[1] *= 0.85;
+    	this._docsDeltaEndPts[1] *= 0.95;
     	this._wordsDeltaEndPts[0] *= 0.7;
-    	this._wordsDeltaEndPts[1] *= 0.85;
+    	this._wordsDeltaEndPts[1] *= 0.95;
     }
     
 	public void trainModel(int iterations, int updateInterval) {
