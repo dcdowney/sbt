@@ -378,9 +378,9 @@ public class SBTDocumentModel implements Serializable {
 	
 	public static double [] interpolateEndPoints(double [] endPts, int length) {
 		double [] out = new double[length];
-		double delt = (endPts[1] - endPts[0])/(length - 1);
+		double delt = (endPts[1] - endPts[0])/(double)(length*length - 1);
 		for(int i=0; i<length; i++) {
-			out[i] = delt*i + endPts[0];
+			out[i] = delt*i*i + endPts[0];
 		}
 		return out;
 	}
@@ -487,10 +487,12 @@ public class SBTDocumentModel implements Serializable {
     
     public void optimizeParameters() {
     	System.out.println("here is where we would optimize parameters.");
-    	this._docsDeltaEndPts[0] *= 0.7;
-    	this._docsDeltaEndPts[1] *= 0.95;
-    	this._wordsDeltaEndPts[0] *= 0.7;
-    	this._wordsDeltaEndPts[1] *= 0.95;
+    	this._docsDeltaEndPts[0] *= 0.99;
+    	this._docsDeltaEndPts[1] *= 0.99;
+    	this._wordsDeltaEndPts[0] *= 0.98;
+    	this._wordsDeltaEndPts[1] *= 0.98;
+    	double [] full = interpolateEndPoints(_wordsDeltaEndPts, this._branchingFactors.length);
+    	System.out.println("full word params: " + Arrays.toString(full));
     }
     
 	public void trainModel(int iterations, int updateInterval) {
