@@ -11,6 +11,7 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -72,8 +73,8 @@ public class SBTDocumentModel implements Serializable {
 	//SparseBackoffTree [] _topicGivenDoc = null;
 	SparseBackoffTree [] _topicGivenWord = null; 
 	double [] _topicMarginal;
-	double [] _docsDeltaEndPts = new double [] {0.1, 0.1};
-	double [] _wordsDeltaEndPts = new double [] {0.1, 0.1};
+	double [] _docsDelta = null;
+	double [] _wordsDelta = null;
 	
 	//threading:
 	private int _NUMTHREADS = -1;
@@ -97,6 +98,11 @@ public class SBTDocumentModel implements Serializable {
 	public SBTDocumentModel(String configFile) throws Exception {
 		readConfigFile(configFile);
 		_struct = new SparseBackoffTreeStructure(_branchingFactors);
+		_wordsDelta = new double[_branchingFactors.length];
+		_docsDelta = new double[_branchingFactors.length];
+		double initDelta = 0.9 / (double)_branchingFactors.length;
+		Arrays.fill(_wordsDelta, initDelta);
+		Arrays.fill(_docsDelta, initDelta);
 	}
 	
 	
@@ -221,6 +227,14 @@ public class SBTDocumentModel implements Serializable {
 		return out;
 	}
 	
+	private TIntDoubleHashMap [] aggregateDocCounts() {
+		TIntDoubleHashMap [] out = new TIntDoubleHashMap[_docs.length];
+		for(int i=0; i<_docs.length; i++) {
+			out[i] = aggregateCounts(_z[i]);
+		}
+		return out;
+	}
+	
 	//scans doc, resampling each variable.  Not used at test time.
 	//returns number of changes
 	private int sampleDoc(int docId) {
@@ -230,8 +244,7 @@ public class SBTDocumentModel implements Serializable {
 		TIntDoubleHashMap docCts = aggregateCounts(zs);
 		SparseBackoffTree sbtDoc = new SparseBackoffTree(_struct);
 		//System.out.println("adding " + docCts.toString());
-		double [] docDs = interpolateEndPoints(this._docsDeltaEndPts, this._branchingFactors.length);
-		sbtDoc.addAllMass(docCts, docDs);
+		sbtDoc.addAllMass(docCts, this._docsDelta);
 		for(int i=0; i<doc.size(); i++) {
 			int newZ = sampleZ(docId, i, false, sbtDoc);
 			if(newZ != zs.get(i))
@@ -346,12 +359,7 @@ public class SBTDocumentModel implements Serializable {
 		}
 	}
 	
-	public void updateWordParamsFromZs(double [] dsWords) {
-		_topicGivenWord = new SparseBackoffTree[_VOCABSIZE];
-		for(int i=0; i<_VOCABSIZE; i++) {
-			_topicGivenWord[i] = new SparseBackoffTree(_struct);
-		}
-		//aggregate:
+	public TIntDoubleHashMap [] aggregateWordCounts() {
 		TIntDoubleHashMap [] hm = new TIntDoubleHashMap[_VOCABSIZE];
 		for(int i=0; i<_z.length; i++) {
 			for(int j=0; j<_z[i].size(); j++) {
@@ -362,6 +370,18 @@ public class SBTDocumentModel implements Serializable {
 				hm[wordID].adjustOrPutValue(z, 1.0, 1.0);
 			}
 		}
+		return hm;
+	}
+	
+	
+	
+	public SparseBackoffTree [] getWordParamsFromZs(double [] dsWords) {
+		SparseBackoffTree [] out = new SparseBackoffTree[_VOCABSIZE];
+		for(int i=0; i<_VOCABSIZE; i++) {
+			out[i] = new SparseBackoffTree(_struct);
+		}
+		//aggregate:
+		TIntDoubleHashMap [] hm = aggregateWordCounts();
 		//add:
 		for(int i=0; i<_VOCABSIZE; i++) {
 			if(hm[i] == null)
@@ -371,9 +391,10 @@ public class SBTDocumentModel implements Serializable {
 				it.advance();
 				int z = it.key();
 				double val = it.value();
-				_topicGivenWord[i].smoothAndAddMass(z, val, dsWords);
+				out[i].smoothAndAddMass(z, val, dsWords);
 			}
 		}
+		return out;
 	}
 	
 	public static double [] interpolateEndPoints(double [] endPts, int length) {
@@ -477,22 +498,196 @@ public class SBTDocumentModel implements Serializable {
 	
     public void updateModel() {
 		System.out.println("first doc samples: " + _z[0].toString());
-    	this.updateWordParamsFromZs(this.interpolateEndPoints(_wordsDeltaEndPts, _branchingFactors.length));
-    	
+    	_topicGivenWord = getWordParamsFromZs(_wordsDelta);
 		_topicMarginal = getNormalizers(_topicGivenWord, _struct);
 		for(int i=0; i<_topicGivenWord.length; i++) 
 			_topicGivenWord[i].divideCountsBy(_topicMarginal);
-		System.out.println("\tdiscounts doc: " + Arrays.toString(this._docsDeltaEndPts) + "\tword: " + Arrays.toString(this._wordsDeltaEndPts));
+		System.out.println("\tdiscounts doc: " + Arrays.toString(_docsDelta) + "\tword: " + Arrays.toString(_wordsDelta));
+    }
+    
+    //hm holds counts
+    //assumes sum of deltas < 1
+    //returns LOOCV log likelihood using current parameters
+    public double updateGradient(double [] grad, TIntDoubleHashMap hm, double [] curDeltas, boolean incremental) {
+    	SparseBackoffTree sbt = new SparseBackoffTree(_struct);
+    	double [] leafCount = new double[curDeltas.length];
+    	leafCount[leafCount.length - 1] = _branchingFactors[leafCount.length - 1];
+    	for(int i=leafCount.length - 2; i>=0;i--) {
+    		leafCount[i] = leafCount[i+1]*_branchingFactors[i];
+    	}
+    	if(hm.size()==1 && hm.containsValue(1.0)) //can't do LOOCV with one observation
+    		return 0.0;
+
+    	ArrayList<Integer> zOrder = new ArrayList<Integer>();
+    	if(!incremental) {
+    		sbt.addAllMass(hm, curDeltas);
+    	}
+    	else {
+    		TIntDoubleIterator it = hm.iterator();
+    		while(it.hasNext()) {
+        		it.advance();
+        		int z = it.key();
+        		double v = it.value();
+        		//TODO: why is v a double?
+    			for(int i=0; i<v; i++) {
+    				zOrder.add(z);
+    			}
+    		}
+    		Collections.shuffle(zOrder);
+    	}
+    	double out = 0.0;
+    	double sumDelta = 0.0;
+    	double singletonSmoothAdd = 0.0;
+    	if(incremental)
+    		sbt.smoothAndAddMass(zOrder.get(0), 1.0, curDeltas);
+    	
+    	for(int i=0; i<curDeltas.length; i++) {
+    		sumDelta += curDeltas[i];
+    		singletonSmoothAdd += curDeltas[i] / leafCount[i];
+    	}
+
+		if(!incremental) {
+			TIntDoubleIterator it = hm.iterator();
+	    	while(it.hasNext()) {
+	    		it.advance();
+	    		int z = it.key();
+	    		double v = it.value();    			
+
+	    		//TODO: optimize around these expensive steps:
+	    		int [] localIdxTrace = _struct.getLocalIdxTrace(z);
+	    		double [] smooths = sbt.getSmoothsTrace(localIdxTrace);
+	    		
+	    		double smoothed = sbt.getSmoothed(z);
+	    		//gradient of log likelihood w.r.t. delta_i is:
+	    		//if num_obs > 1:
+	    		//  num_obs * (smooth_i/delta_i - 1) / [(get_smoothed_i - 1)]
+	    		//else
+	    		//  (num_leaves * smooth_i/delta - 1) / (num_leaves * (get_smoothed_i + sum_deltas - ))
+	    		for(int i=0; i<grad.length; i++) {
+		    		if(v > 1.0) {
+		    			grad[i] += v * (smooths[i]/curDeltas[i] - 1.0) / (smoothed - 1.0);
+		    			out += v * Math.log((smoothed - 1.0) / (sbt._totalMass - 1.0));
+		    		}
+		    		else {
+		    			grad[i] += (leafCount[i]*smooths[i]/curDeltas[i] - 1.0) / (leafCount[i] * (smoothed + sumDelta - 1.0 - singletonSmoothAdd));
+		    			out += Math.log((smoothed + sumDelta - 1.0 - singletonSmoothAdd) / (sbt._totalMass - 1.0));
+		    		}
+	    		}
+	    	}
+		}
+		else {
+			Iterator<Integer> it = zOrder.iterator();
+			//skip the first one:
+			it.next();
+			while(it.hasNext()) {
+	    		int z = it.next();    			
+
+	    		//TODO: optimize around these expensive steps:
+	    		int [] localIdxTrace = _struct.getLocalIdxTrace(z);
+	    		double [] smooths = sbt.getSmoothsTrace(localIdxTrace);
+	    		
+	    		double [] countSmoothed = sbt.getSmoothAndCount(z);
+	    		double smoothed = countSmoothed[0] + countSmoothed[1];
+	    		//gradient of log likelihood w.r.t. delta_i is:
+	    		//if num_obs > 1:
+	    		//  num_obs * (smooth_i/delta_i - 1) / [(get_smoothed_i - 1)]
+	    		//else
+	    		//  (num_leaves * smooth_i/delta - 1) / (num_leaves * (get_smoothed_i + sum_deltas - ))
+	    		for(int i=0; i<grad.length; i++) {
+		    		if(countSmoothed[1] > 0.0) { //delta has negative as well as positive influence
+		    			grad[i] += (smooths[i]/curDeltas[i] - 1.0) / smoothed;
+		    		}
+		    		else {
+		    			grad[i] += (smooths[i]/curDeltas[i]) / smoothed;
+		    		}
+		    		out += Math.log(smoothed / sbt._totalMass);
+	    		}
+	    		if(countSmoothed[1] > 0.0)
+	    			sbt.addMass(z, 1.0);
+	    		else
+	    			sbt.smoothAndAddMass(z, 1.0, curDeltas);
+	    	}
+		}
+    	return out;
+    }
+    
+    //returns gradient normalized to sum to stepSize
+    //or less, if needed to ensure gradient + curDeltas sums to < 1.0 and has no negative elements 
+    public double [] normalizeAndCheckBounds(double [] gradient, double [] curDeltas, double stepSize) {
+
+    	double normalizer = 1.0 / stepSize;
+    	double [] out = new double[gradient.length];
+
+    	while(true) {
+	    	double sum = 0.0;
+	    	for(int i=0; i<gradient.length; i++) {
+	    		sum += Math.abs(gradient[i]);
+	    	}
+	    	sum *= normalizer;
+	    	//sum = normalizer;
+	    	
+	    	boolean outOfBounds = false;
+	    	double newSum = 0.0;
+	    	for(int i=0; i<gradient.length; i++) {
+	    		out[i] = gradient[i]/sum;
+	    		if(out[i] + curDeltas[i] < 1E-5) {
+	    			out[i] = 1E-5 - curDeltas[i];
+	    		}
+	    		newSum += out[i] + curDeltas[i];
+	    	}
+	    	if(newSum >= 1.0)
+	    		normalizer *= 2.0;
+	    	else {
+	    		if(newSum < stepSize) {
+	    			for(int i=0; i<gradient.length; i++) {
+	    				out[i] *= (stepSize / newSum);
+	    			}
+	    		}
+	    		break;
+	    	}
+    	}
+    	
+    	return out;
+    }
+    
+    public void addAtoB(double [] a, double [] b) {
+    	for(int i=0; i<a.length; i++) 
+    		b[i] += a[i];
+    }
+    
+    public void gradientStep(double [] deltas, TIntDoubleHashMap [] hm, double stepSize, boolean incremental) {
+    	double [] gradient = new double[deltas.length];
+    	double LL = 0.0;
+    	for(int i=0; i<hm.length; i++) {
+    		if(hm[i] != null)
+    			LL += updateGradient(gradient, hm[i], deltas, incremental);
+    	}
+    	System.out.println("LL: " + LL);
+    	System.out.println("got grad " + Arrays.toString(gradient));
+    	double [] newGradient = this.normalizeAndCheckBounds(gradient, deltas, stepSize);
+    	System.out.println("applying " + Arrays.toString(newGradient));
+    	addAtoB(newGradient, deltas);
+    	
     }
     
     public void optimizeParameters() {
-    	System.out.println("here is where we would optimize parameters.");
-    	this._docsDeltaEndPts[0] *= 0.99;
-    	this._docsDeltaEndPts[1] *= 0.99;
-    	this._wordsDeltaEndPts[0] *= 0.98;
-    	this._wordsDeltaEndPts[1] *= 0.98;
-    	double [] full = interpolateEndPoints(_wordsDeltaEndPts, this._branchingFactors.length);
-    	System.out.println("full word params: " + Arrays.toString(full));
+//    	for(int i=0; i<_wordsDelta.length; i++) {
+//    		_wordsDelta[i] *= 0.9;
+//    		_docsDelta[i] *= 0.9;
+//    	}
+    	
+    	TIntDoubleHashMap [] hm = aggregateWordCounts();
+    	System.out.println("words:");
+    	for(double stepSize = 0.01; stepSize > 0.005; stepSize *= 0.95) {
+        	gradientStep(_wordsDelta, hm, stepSize, false);    		
+    	}
+    	hm = aggregateDocCounts();
+    	System.out.println("docs:");
+    	for(double stepSize = 0.01; stepSize > 0.005; stepSize *= 0.95) {
+        	gradientStep(_docsDelta, hm, stepSize, true);    		
+    	}
+    	System.out.println("full word params: " + Arrays.toString(_wordsDelta));
+    	System.out.println("full doc params: " + Arrays.toString(_docsDelta));
     }
     
 	public void trainModel(int iterations, int updateInterval) {
@@ -557,7 +752,7 @@ public class SBTDocumentModel implements Serializable {
 					for(int k =0; k<_z[doc].size(); k++) {
 						int r = _z[doc].get(k);
 						if(r != -1)
-							topicGivenDoc.smoothAndAddMass(r, 1.0, ds);
+							topicGivenDoc.addAndSmoothIfNonZero(r, 1.0, ds);
 					}
 						//resample everything before:
 					for(int k=0; k<i; k++) {
@@ -653,10 +848,9 @@ public class SBTDocumentModel implements Serializable {
 	//returns {ppl, number of tested words}
 	//numDocs is number in test file
 	public static double [] testModel(String modelFile, String testFile, int numDocs, int maxDocs) throws Exception {
-		boolean CHECKWORDDISTRIBUTION = true;
+		boolean CHECKWORDDISTRIBUTION = false;
 		
 		SBTDocumentModel sbtdm = readModel(modelFile);
-		double [] ds = interpolateEndPoints(sbtdm._docsDeltaEndPts, sbtdm._branchingFactors.length);
 		double numWordTrainToks = (double)sbtdm._NUMTOKENS;
 		double [] wordTopicNormalizer = getCheckMarginal(sbtdm._topicGivenWord, sbtdm._struct); 
 		int numStates = wordTopicNormalizer.length;
@@ -688,7 +882,7 @@ public class SBTDocumentModel implements Serializable {
 				System.out.println("skipping " + i);
 				continue;
 			}
-			tds[i] = sbtdm.new TestDoer(i, ds, wordTopicNormalizer);
+			tds[i] = sbtdm.new TestDoer(i, sbtdm._docsDelta, wordTopicNormalizer);
 			e.execute(tds[i]);
 		}
 		e.shutdown();

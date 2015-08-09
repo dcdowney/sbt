@@ -44,6 +44,15 @@ public class SparseBackoffTree {
 		return sc[0] + sc[1];
 	}
 	
+	//only performs smoothing if count at leaf is zero 
+	public void addAndSmoothIfNonZero(int i, double mass, double [] ds) {
+		double [] smAndCt = this.getSmoothAndCount(i);
+		if(smAndCt[1] > 0.0)
+			addMass(i, mass);
+		else
+			smoothAndAddMass(i, mass, ds);
+	}
+	
 	//adds the given mass after applying the given discounts
 	//discounts are provided from shallowest level to deepest
 	//NOTE ignores the discounts in the sbt structure!!  Use with care.
@@ -271,6 +280,20 @@ public class SparseBackoffTree {
 		}
 		return out;
 	}
+	
+	public double [] getSmoothsTrace(int [] localIdxTrace) {
+		double [] out = new double[localIdxTrace.length];
+		SparseBackoffTree sbt = this;
+		for(int i=0; i<out.length; i++) {
+			if(sbt == null) //can happen if no mass here
+				break;
+			out[i] = sbt._smooth;
+			if(i < out.length - 1)
+				sbt = sbt._children[localIdxTrace[i]];
+		}
+		return out;
+	}
+	
 	
 	//returns a two-element array {smooth total, count total} for the given leaf
 	public double [] getSmoothAndCount(int leafIdx) {
