@@ -85,6 +85,10 @@ public class SBTDocumentModel implements Serializable {
 	private int _NUMITERATIONS = -1;
 	private int _OPTIMIZEINTERVAL = -1;
 	
+	//testing config:
+	private int _NUMPARTICLES = -1;
+	private int _MAXTESTDOCSIZE = -1;
+	
 	public int[] get_branchingFactors() {
 		return _branchingFactors;
 	}
@@ -105,6 +109,25 @@ public class SBTDocumentModel implements Serializable {
 		Arrays.fill(_docsDelta, initDelta);
 	}
 	
+
+	public int get_NUMPARTICLES() {
+		return _NUMPARTICLES;
+	}
+
+
+	public void set_NUMPARTICLES(int _NUMPARTICLES) {
+		this._NUMPARTICLES = _NUMPARTICLES;
+	}
+
+
+	public int get_MAXTESTDOCSIZE() {
+		return _MAXTESTDOCSIZE;
+	}
+
+
+	public void set_MAXTESTDOCSIZE(int _MAXTESTDOCSIZE) {
+		this._MAXTESTDOCSIZE = _MAXTESTDOCSIZE;
+	}
 	
 	public int get_VOCABSIZE() {
 		return _VOCABSIZE;
@@ -655,7 +678,8 @@ public class SBTDocumentModel implements Serializable {
     		b[i] += a[i];
     }
     
-    public void gradientStep(double [] deltas, TIntDoubleHashMap [] hm, double stepSize, boolean incremental) {
+    //applies and returns gradient
+    public double [] gradientStep(double [] deltas, TIntDoubleHashMap [] hm, double stepSize, boolean incremental) {
     	double [] gradient = new double[deltas.length];
     	double LL = 0.0;
     	for(int i=0; i<hm.length; i++) {
@@ -667,7 +691,7 @@ public class SBTDocumentModel implements Serializable {
     	double [] newGradient = this.normalizeAndCheckBounds(gradient, deltas, stepSize);
     	System.out.println("applying " + Arrays.toString(newGradient));
     	addAtoB(newGradient, deltas);
-    	
+    	return gradient;
     }
     
     public void optimizeParameters() {
@@ -675,16 +699,28 @@ public class SBTDocumentModel implements Serializable {
 //    		_wordsDelta[i] *= 0.9;
 //    		_docsDelta[i] *= 0.9;
 //    	}
-    	
+    	//TODO: multi-thread
+//    	double STEPSIZE = 0.01; //start stepping this far in L1 norm
+//    	double STEPDEC = 0.95; //decrease step size this much each step
+//    	int NUMSTEPS = 20; //number of steps to take
+    	double STEPSIZE = 0.02; //start stepping this far in L1 norm
+    	double STEPDEC = 0.8; //decrease step size this much each step
+    	int NUMSTEPS = 10; //number of steps to take
+
     	TIntDoubleHashMap [] hm = aggregateWordCounts();
     	System.out.println("words:");
-    	for(double stepSize = 0.01; stepSize > 0.005; stepSize *= 0.95) {
-        	gradientStep(_wordsDelta, hm, stepSize, false);    		
+    	double [] gradient = new double[_wordsDelta.length];
+    	double step = STEPSIZE;
+    	for(int i=0; i<NUMSTEPS; i++) {
+        	gradient = gradientStep(_wordsDelta, hm, step, false);
+        	step *= STEPDEC;
     	}
     	hm = aggregateDocCounts();
     	System.out.println("docs:");
-    	for(double stepSize = 0.01; stepSize > 0.005; stepSize *= 0.95) {
-        	gradientStep(_docsDelta, hm, stepSize, true);    		
+    	step = STEPSIZE;
+    	for(int i=0; i<NUMSTEPS; i++) {
+        	gradient = gradientStep(_docsDelta, hm, step, true);
+        	step *= STEPDEC;
     	}
     	System.out.println("full word params: " + Arrays.toString(_wordsDelta));
     	System.out.println("full doc params: " + Arrays.toString(_docsDelta));
@@ -725,17 +761,16 @@ public class SBTDocumentModel implements Serializable {
 	}
 	
 	public double [] testOnDocFullPpl(int doc, double [] ds, double [] wordTopicMarginal) {
-		boolean CHECKSUMTOONE = false;
+		boolean CHECKSUMTOONE = false; //slow.  Can use to confirm that test code uses a valid probability distribution over words
 		double LL = 0.0;
 		double numWords = 0.0;
-		final int PARTICLES = 20;
 		ArrayList<Integer> wordOrder = new ArrayList<Integer>();
 		for(int i=0; i<_docs[doc].size(); i++) {
 			wordOrder.add(i);
 		}
 		Collections.shuffle(wordOrder);
 		double [] ps = new double[wordOrder.size()];
-		for(int j=0; j<PARTICLES; j++) {
+		for(int j=0; j<_NUMPARTICLES; j++) {
 			SparseBackoffTree topicGivenDoc = new SparseBackoffTree(_struct);
 			numWords = 0.0;
 			for(int i=0; i<_docs[doc].size(); i++) {
@@ -752,7 +787,7 @@ public class SBTDocumentModel implements Serializable {
 					for(int k =0; k<_z[doc].size(); k++) {
 						int r = _z[doc].get(k);
 						if(r != -1)
-							topicGivenDoc.addAndSmoothIfNonZero(r, 1.0, ds);
+							topicGivenDoc.addAndSmoothIfZero(r, 1.0, ds);
 					}
 						//resample everything before:
 					for(int k=0; k<i; k++) {
@@ -827,7 +862,7 @@ public class SBTDocumentModel implements Serializable {
 			int widx = wordOrder.get(i);
 			int w = _docs[doc].get(widx);
 			if(_pWord[w] > 0) {
-				LL += Math.log(ps[widx]/(double)PARTICLES);
+				LL += Math.log(ps[widx]/(double)_NUMPARTICLES);
 				if(Double.isNaN(LL))
 					System.out.println("got NaN with " + ps[widx]);
 				numWords++;
@@ -847,11 +882,11 @@ public class SBTDocumentModel implements Serializable {
 	//computes log likelihood of model using left-to-right method
 	//returns {ppl, number of tested words}
 	//numDocs is number in test file
-	public static double [] testModel(String modelFile, String testFile, int numDocs, int maxDocs) throws Exception {
+	public static double [] testModel(String modelFile, String testFile, int numDocs, int maxDocs, String configFile) throws Exception {
 		boolean CHECKWORDDISTRIBUTION = false;
 		
 		SBTDocumentModel sbtdm = readModel(modelFile);
-		double numWordTrainToks = (double)sbtdm._NUMTOKENS;
+		sbtdm.readConfigFile(configFile);
 		double [] wordTopicNormalizer = getCheckMarginal(sbtdm._topicGivenWord, sbtdm._struct); 
 		int numStates = wordTopicNormalizer.length;
 
@@ -878,8 +913,8 @@ public class SBTDocumentModel implements Serializable {
 		ExecutorService e = Executors.newFixedThreadPool(sbtdm._NUMTHREADS);
 		//ExecutorService e = Executors.newFixedThreadPool(1);
 		for(int i=0; i<tds.length;i++) {
-			if(sbtdm._docs[i].size() > 2000) {
-				System.out.println("skipping " + i);
+			if(sbtdm._MAXTESTDOCSIZE < 0 || sbtdm._docs[i].size() > sbtdm._MAXTESTDOCSIZE) {
+				System.out.println("skipping " + i + " size " + sbtdm._docs[i].size());
 				continue;
 			}
 			tds[i] = sbtdm.new TestDoer(i, sbtdm._docsDelta, wordTopicNormalizer);
@@ -905,8 +940,8 @@ public class SBTDocumentModel implements Serializable {
 		return new double [] {LL, numWords};
 	}
 	
-	public static void test(String modelFile, String inputFile, int numDocsInFile, int numDocsToTest) throws Exception {
-		double [] ll = testModel(modelFile, inputFile, numDocsInFile, numDocsToTest);
+	public static void test(String modelFile, String inputFile, int numDocsInFile, int numDocsToTest, String configFile) throws Exception {
+		double [] ll = testModel(modelFile, inputFile, numDocsInFile, numDocsToTest, configFile);
 		System.out.println("Test ppl: " + Arrays.toString(ll));
 	}
 	
@@ -917,12 +952,12 @@ public class SBTDocumentModel implements Serializable {
 				return;
 			}
 			train(args[1], args[2], args[3]);
-		}
+		} 
 		else if(args.length > 0 && args[0].equalsIgnoreCase("test")) {
-			if(args.length != 5) {
-				System.err.println("Usage: SBTDocumentModel test <model_file> <test_file> <num_docs_in_file> <num_docs_to_test>");
+			if(args.length != 6) {
+				System.err.println("Usage: SBTDocumentModel test <model_file> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>");
 			}
-			test(args[1], args[2], Integer.parseInt(args[3]), Integer.parseInt(args[4]));
+			test(args[1], args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3]);
 		}
 		else {
 			System.err.println("Usage: SBTDocumentModel <train|test> <args...>");

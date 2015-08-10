@@ -45,7 +45,7 @@ public class SparseBackoffTree {
 	}
 	
 	//only performs smoothing if count at leaf is zero 
-	public void addAndSmoothIfNonZero(int i, double mass, double [] ds) {
+	public void addAndSmoothIfZero(int i, double mass, double [] ds) {
 		double [] smAndCt = this.getSmoothAndCount(i);
 		if(smAndCt[1] > 0.0)
 			addMass(i, mass);
