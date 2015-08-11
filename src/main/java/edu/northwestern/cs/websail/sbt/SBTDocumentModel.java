@@ -24,9 +24,6 @@ import gnu.trove.map.hash.TIntDoubleHashMap;
 
 public class SBTDocumentModel implements Serializable {
 
-    /**
-	 * 
-	 */
 	private static final long serialVersionUID = 1L;
 
 	private class GibbsDoer implements Runnable {
@@ -84,11 +81,45 @@ public class SBTDocumentModel implements Serializable {
 	//training config:
 	private int _NUMITERATIONS = -1;
 	private int _OPTIMIZEINTERVAL = -1;
+	private int [] _EXPANSIONSCHEDULE = null; //specifies indexes of branching factor to introduce incrementally
+	private int _USEEXPANSION = 1; //1 for yes, 0 for no
+	private int [] _expansionBranchFactors = null; //when expansion is used, holds the full branching factors
 	
 	//testing config:
 	private int _NUMPARTICLES = -1;
 	private int _MAXTESTDOCSIZE = -1;
 	
+	public SBTDocumentModel(String configFile) throws Exception {
+		readConfigFile(configFile);
+		if(_USEEXPANSION == 1) {
+			if(_EXPANSIONSCHEDULE == null) {
+				_EXPANSIONSCHEDULE = defaultExpansion(_branchingFactors.length);
+			}
+			_expansionBranchFactors = Arrays.copyOf(_branchingFactors, _branchingFactors.length);
+			_branchingFactors = Arrays.copyOf(_branchingFactors, _EXPANSIONSCHEDULE[0]+1);
+		}
+		_struct = new SparseBackoffTreeStructure(_branchingFactors);
+		initDeltas();
+	}
+	
+	public void initDeltas() {
+		_wordsDelta = new double[_branchingFactors.length];
+		_docsDelta = new double[_branchingFactors.length];
+		double initDelta = 0.9 / (double)_branchingFactors.length;
+		Arrays.fill(_wordsDelta, initDelta);
+		Arrays.fill(_docsDelta, initDelta);
+	}
+	
+	public int get_USEEXPANSION() {
+		return _USEEXPANSION;
+	}
+
+
+
+	public void set_USEEXPANSION(int _USEEXPANSION) {
+		this._USEEXPANSION = _USEEXPANSION;
+	}
+
 	public int[] get_branchingFactors() {
 		return _branchingFactors;
 	}
@@ -99,16 +130,13 @@ public class SBTDocumentModel implements Serializable {
 	}
 
 
-	public SBTDocumentModel(String configFile) throws Exception {
-		readConfigFile(configFile);
-		_struct = new SparseBackoffTreeStructure(_branchingFactors);
-		_wordsDelta = new double[_branchingFactors.length];
-		_docsDelta = new double[_branchingFactors.length];
-		double initDelta = 0.9 / (double)_branchingFactors.length;
-		Arrays.fill(_wordsDelta, initDelta);
-		Arrays.fill(_docsDelta, initDelta);
+	public int[] get_EXPANSIONSCHEDULE() {
+		return _EXPANSIONSCHEDULE;
 	}
-	
+
+	public void set_EXPANSIONSCHEDULE(int[] _EXPANSIONSCHEDULE) {
+		this._EXPANSIONSCHEDULE = _EXPANSIONSCHEDULE;
+	}
 
 	public int get_NUMPARTICLES() {
 		return _NUMPARTICLES;
@@ -201,6 +229,14 @@ public class SBTDocumentModel implements Serializable {
 		_THREADBREAKS[_NUMTHREADS - 1] = _NUMDOCS - 1;
 	}
 
+	public int [] defaultExpansion(int numLevels) {
+		int [] out = new int[numLevels];
+		for(int i=0; i<out.length; i++) {
+			out[i] = i;
+		}
+		return out;
+	}
+	
 	//config file has lines of form <param-name without underscore>\t<integer value> [<integer value> ...]
 	public void readConfigFile(String inFile) throws Exception {
 		System.out.println("reading config file.");
@@ -473,8 +509,8 @@ public class SBTDocumentModel implements Serializable {
     
     
 	//returns array of amt_i
-	//such that if we divide leaf counts by amt_i, we get "proper smoothing"
-    //TODO: improve this comment
+	//such that if we divide leaf counts by amt_i, we get smoothing with marginal P(z)
+    //(see paper)
 	public static double [] getNormalizers(SparseBackoffTree [] shds, SparseBackoffTreeStructure struct) {
 		int numStates = struct.numLeaves();
 		double [] count = new double[numStates];
@@ -509,9 +545,6 @@ public class SBTDocumentModel implements Serializable {
 		int numStates = struct.numLeaves();
 		double [] out = new double[numStates];
 		SparseBackoffTree shdAgg = SparseBackoffTree.sum(shds, struct);
-		double maxSmooth = 0.0f;
-		double sumCount = 0.0f;
-		double sumSmoother = 0.0f;
 		for(int i=0; i<numStates; i++) {
 			double [] smoothAndCount = shdAgg.getSmoothAndCount(i);
 			out[i] += smoothAndCount[0] + smoothAndCount[1];
@@ -519,6 +552,9 @@ public class SBTDocumentModel implements Serializable {
 		return out;
 	}
 	
+	/**
+	 * Updates the model given the topic assignments (_z) and divides by marginal for next sampling pass
+	 */
     public void updateModel() {
 		System.out.println("first doc samples: " + _z[0].toString());
     	_topicGivenWord = getWordParamsFromZs(_wordsDelta);
@@ -528,9 +564,16 @@ public class SBTDocumentModel implements Serializable {
 		System.out.println("\tdiscounts doc: " + Arrays.toString(_docsDelta) + "\tword: " + Arrays.toString(_wordsDelta));
     }
     
-    //hm holds counts
-    //assumes sum of deltas < 1
-    //returns LOOCV log likelihood using current parameters
+    /**
+     * Adds the gradient of the log likelihood for the given observations
+     * Assumes sum of deltas < 1
+     * @param grad	the gradient is added here
+     * @param hm	the observations
+     * @param curDeltas	the current hyperparameters
+     * @param incremental	if true, measure log likelihood when introducing observations one-by-one in random order;
+     * otherwise, use leave-one-out cross validation
+     * @return	log likelihood using current parameters
+     */
     public double updateGradient(double [] grad, TIntDoubleHashMap hm, double [] curDeltas, boolean incremental) {
     	SparseBackoffTree sbt = new SparseBackoffTree(_struct);
     	double [] leafCount = new double[curDeltas.length];
@@ -634,8 +677,14 @@ public class SBTDocumentModel implements Serializable {
     	return out;
     }
     
-    //returns gradient normalized to sum to stepSize
-    //or less, if needed to ensure gradient + curDeltas sums to < 1.0 and has no negative elements 
+    /**
+     * returns gradient normalized to sum to stepSize 
+     * (or less, if needed to ensure gradient + curDeltas sums to < 1.0 and has no negative elements)
+     * @param gradient	gradient to normalize
+     * @param curDeltas	current hyperparameters to which gradient will be applied
+     * @param stepSize	how far to move (in L1)
+     * @return
+     */
     public double [] normalizeAndCheckBounds(double [] gradient, double [] curDeltas, double stepSize) {
 
     	double normalizer = 1.0 / stepSize;
@@ -678,7 +727,15 @@ public class SBTDocumentModel implements Serializable {
     		b[i] += a[i];
     }
     
-    //applies and returns gradient
+    /**
+     * Applies and returns gradient
+     * @param deltas	hyperparameters to start from
+     * @param hm	observation counts
+     * @param stepSize	how far to move in the step, in L1 norm
+     * @param incremental	if true, measure log likelihood when introducing observations one-by-one in random order;
+     * otherwise, use leave-one-out cross validation
+     * @return
+     */
     public double [] gradientStep(double [] deltas, TIntDoubleHashMap [] hm, double stepSize, boolean incremental) {
     	double [] gradient = new double[deltas.length];
     	double LL = 0.0;
@@ -694,6 +751,9 @@ public class SBTDocumentModel implements Serializable {
     	return gradient;
     }
     
+    /**
+     * Optimizes parameters using gradient ascent in log likelihood
+     */
     public void optimizeParameters() {
 //    	for(int i=0; i<_wordsDelta.length; i++) {
 //    		_wordsDelta[i] *= 0.9;
@@ -709,33 +769,74 @@ public class SBTDocumentModel implements Serializable {
 
     	TIntDoubleHashMap [] hm = aggregateWordCounts();
     	System.out.println("words:");
-    	double [] gradient = new double[_wordsDelta.length];
     	double step = STEPSIZE;
     	for(int i=0; i<NUMSTEPS; i++) {
-        	gradient = gradientStep(_wordsDelta, hm, step, false);
+        	gradientStep(_wordsDelta, hm, step, false);
         	step *= STEPDEC;
     	}
     	hm = aggregateDocCounts();
     	System.out.println("docs:");
     	step = STEPSIZE;
     	for(int i=0; i<NUMSTEPS; i++) {
-        	gradient = gradientStep(_docsDelta, hm, step, true);
+        	gradientStep(_docsDelta, hm, step, true);
         	step *= STEPDEC;
     	}
     	System.out.println("full word params: " + Arrays.toString(_wordsDelta));
     	System.out.println("full doc params: " + Arrays.toString(_docsDelta));
     }
     
+    /**
+     * Expands the model
+     * @param expansionIndex	The desired index in _EXPANSIONSCHEDULE to expand to.
+     * @return	whether the model was expanded
+     */
+    public boolean expandModel(int expansionIndex) {
+    	if(expansionIndex < _EXPANSIONSCHEDULE.length) {
+    		int curLeaves = _struct.numLeaves(); 
+    		//get new structure
+    		_branchingFactors = Arrays.copyOf(this._expansionBranchFactors, _EXPANSIONSCHEDULE[expansionIndex] + 1);
+    		_struct = new SparseBackoffTreeStructure(_branchingFactors);
+    		initDeltas();
+    		int multiplier = _struct.numLeaves()/curLeaves;
+    		System.out.println("Expanding to " + Arrays.toString(_branchingFactors));
+    		for(int i=0; i<_z.length;i++) {
+    			for(int j=0; j<_z[i].size(); j++) {
+    				int z = multiplier * _z[i].get(j) + _r.nextInt(multiplier);
+    				_z[i].set(j,  z);
+    			}
+    		}
+    		updateModel();
+    		return true;
+    	}
+    	else
+    		return false;
+    }
+    
+    /**
+     * Trains the model for a specified number of iterations.
+     *
+     * @param  iterations  the number of Gibbs passes to perform
+     * @param  updateInterval	number of iterations between hyperparameter updates
+     */
 	public void trainModel(int iterations, int updateInterval) {
-		
-		for(int i=1; i<=iterations; i++) {
-			System.out.print(i + ": ");
-			gibbsPass();
-			if((i % updateInterval)==0) { 
-				optimizeParameters();
+		boolean done = false;
+		int j=0;
+		while(!done) {
+			for(int i=1; i<=iterations; i++) {
+				System.out.print(i + ": ");
+				gibbsPass();
+				if((i % updateInterval)==0) { 
+					optimizeParameters();
+				}
+				updateModel();
 			}
-			updateModel();
-		}
+			if(this._USEEXPANSION == 1) {
+				j++;
+				done = !expandModel(j);
+			}
+			else 
+				done = true;
+		}		
 	}
 	
 	public void writeModel(String outFile) throws Exception {
@@ -760,6 +861,9 @@ public class SBTDocumentModel implements Serializable {
 		return out;
 	}
 	
+	
+	//tests on a single document using left-to-right method
+	//word topic marginal (i.e. P(topic) computed from P(topic, word)) is supplied to ensure evaluated distribution sums to one
 	public double [] testOnDocFullPpl(int doc, double [] ds, double [] wordTopicMarginal) {
 		boolean CHECKSUMTOONE = false; //slow.  Can use to confirm that test code uses a valid probability distribution over words
 		double LL = 0.0;
@@ -882,6 +986,7 @@ public class SBTDocumentModel implements Serializable {
 	//computes log likelihood of model using left-to-right method
 	//returns {ppl, number of tested words}
 	//numDocs is number in test file
+	//maxDocs is number actually tested (starting from the beginning of the file)
 	public static double [] testModel(String modelFile, String testFile, int numDocs, int maxDocs, String configFile) throws Exception {
 		boolean CHECKWORDDISTRIBUTION = false;
 		
