@@ -1053,19 +1053,19 @@ public class SBTDocumentModel implements Serializable {
 	public static void main(String[] args) throws Exception {
 		if(args.length > 0 && args[0].equalsIgnoreCase("train")) {
 			if(args.length != 4) {
-				System.err.println("Usage: SBTDocumentModel train <input_file> <model_output_file> <configuration_file>");
+				System.err.println("Usage: train <input_file> <model_output_file> <configuration_file>");
 				return;
 			}
 			train(args[1], args[2], args[3]);
 		} 
 		else if(args.length > 0 && args[0].equalsIgnoreCase("test")) {
 			if(args.length != 6) {
-				System.err.println("Usage: SBTDocumentModel test <model_file> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>");
+				System.err.println("Usage: test <model_file> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>");
 			}
 			test(args[1], args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3]);
 		}
 		else {
-			System.err.println("Usage: SBTDocumentModel <train|test> <args...>");
+			System.err.println("Usage: <train|test> <args...>");
 		}
 	}
 
