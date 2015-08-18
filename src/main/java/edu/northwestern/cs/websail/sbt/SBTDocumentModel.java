@@ -1,11 +1,13 @@
 package edu.northwestern.cs.websail.sbt;
 
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.io.OutputStreamWriter;
 import java.io.Serializable;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -1013,7 +1015,6 @@ public class SBTDocumentModel implements Serializable {
 		sbtdm.reInitForCorpus(testFile, numDocs);
 		double LL = 0.0;
 		double numWords = 0.0;
-		double origWords = 0.0;
 		TestDoer [] tds = new TestDoer[maxDocs];
 		ExecutorService e = Executors.newFixedThreadPool(sbtdm._NUMTHREADS);
 		//ExecutorService e = Executors.newFixedThreadPool(1);
@@ -1041,13 +1042,38 @@ public class SBTDocumentModel implements Serializable {
 			LL += tds[i]._res[0];
 			numWords += tds[i]._res[1];
 		}
-		System.out.println("total orig words: " + origWords);
 		return new double [] {LL, numWords};
 	}
 	
 	public static void test(String modelFile, String inputFile, int numDocsInFile, int numDocsToTest, String configFile) throws Exception {
 		double [] ll = testModel(modelFile, inputFile, numDocsInFile, numDocsToTest, configFile);
 		System.out.println("Test ppl: " + Arrays.toString(ll));
+	}
+	
+	/**
+	 * Outputs the sparse word-to-topic vector proportional to P(t | w)/P(t) for words and topics with positive counts
+	 * @param modelFile	Contains the model
+	 * @param outputFile	Where to write the output
+	 * @throws Exception
+	 */
+	public static void outputWordToTopicFile(String modelFile, String outputFile) throws Exception {
+		BufferedWriter bwOut = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(outputFile), "UTF8"));
+		SBTDocumentModel sbtdm = readModel(modelFile);
+		for(int i=0; i<sbtdm._pWord.length; i++) {
+			if(sbtdm._pWord[i] > 0.0) {
+				bwOut.write(i + "\t");
+				TIntDoubleHashMap hm = sbtdm._topicGivenWord[i].getLeafCounts();
+				TIntDoubleIterator it = hm.iterator();
+				while(it.hasNext()) {
+					it.advance();
+					int wId = it.key();
+					double val = it.value();
+					bwOut.write(wId + ":" + val + " ");
+				}
+				bwOut.write("\r\n");
+			}
+		}
+		
 	}
 	
 	public static void main(String[] args) throws Exception {
@@ -1064,8 +1090,14 @@ public class SBTDocumentModel implements Serializable {
 			}
 			test(args[1], args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3]);
 		}
+		else if(args.length > 0 && args[0].equalsIgnoreCase("wordreps")) {
+			if(args.length != 3) {
+				System.err.println("Usage: wordreps <model_file> <output_file>");
+			}
+			outputWordToTopicFile(args[1], args[2]);
+		}
 		else {
-			System.err.println("Usage: <train|test> <args...>");
+			System.err.println("Usage: <train|test|wordreps> <args...>");
 		}
 	}
 

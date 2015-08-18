@@ -294,6 +294,29 @@ public class SparseBackoffTree {
 		return out;
 	}
 	
+	/**
+	 * Returns a sparse hash map containing leaves with non-zero counts
+	 * @return
+	 */
+	public TIntDoubleHashMap getLeafCounts() {
+		TIntDoubleHashMap out = new TIntDoubleHashMap();
+		if(this._children != null) {
+			for(int i=0; i<_children.length; i++) {
+				if(_children[i] != null)
+					out.putAll(_children[i].getLeafCounts());
+			}
+		}
+		else {
+			for(int i=0; i<_childMass.length; i++) {
+				double d = _childMass[i];
+				if(d > 0.0) {
+					int idx = _struct.getGlobalIndex(i);
+					out.put(idx, d);
+				}
+			}
+		}
+		return out;
+	}
 	
 	//returns a two-element array {smooth total, count total} for the given leaf
 	public double [] getSmoothAndCount(int leafIdx) {
