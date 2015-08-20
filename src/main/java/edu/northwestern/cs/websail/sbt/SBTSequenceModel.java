@@ -18,13 +18,14 @@ import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-
 import gnu.trove.iterator.TIntDoubleIterator;
 import gnu.trove.iterator.TIntIterator;
 import gnu.trove.list.array.TIntArrayList;
 import gnu.trove.map.hash.TIntDoubleHashMap;
 
-public class SBTDocumentModel implements Serializable {
+//TODO: factor out all the gross duplication between this class and SBTDocumentModel
+
+public class SBTSequenceModel implements Serializable {
 
 	private static final long serialVersionUID = 2L;
 
@@ -55,20 +56,28 @@ public class SBTDocumentModel implements Serializable {
     		System.out.println(_doc + "\t" + _res[0] + "\t" + _res[1]);
     	}
     }
+
+	
+	//Model information:
+    //state index zero is special start-of-sentence state
+	int [] _branchingFactors;
+	SparseBackoffTree [] _forward;
+	SparseBackoffTree [] _backward;
+	SparseBackoffTree [] _wordToState;
+	double [] _wordStateMarginal;
+	double [] _backwardStateMarginal;
+	
+	SparseBackoffTreeStructure _struct;
+	double [] _forwardDelta = null;
+	double [] _backwardDelta = null;
+	double [] _wordDelta = null;
+	
+	Corpus _c;
 	
 	Random _r = new Random();
 	
-	private Corpus _c;
+	//TODO: think about wrapping all of threading/train config up into a trainer class
 	
-	//Model information:
-	int [] _branchingFactors;
-	SparseBackoffTreeStructure _struct = null;
-	SparseBackoffTree [] _topicGivenWord = null; 
-	double [] _topicMarginal;
-	double [] _docsDelta = null;
-	double [] _wordsDelta = null;
-	
-
 	//threading:
 	private int _NUMTHREADS = -1;
 	private int[] _THREADBREAKS = null; //inclusive doc indices where threads *end* (initial thread starts
@@ -85,7 +94,7 @@ public class SBTDocumentModel implements Serializable {
 	private int _NUMPARTICLES = -1;
 	private int _MAXTESTDOCSIZE = -1;
 	
-	public SBTDocumentModel(String configFile) throws Exception {
+	public SBTSequenceModel(String configFile) throws Exception {
 		_c = new Corpus();
 		readConfigFile(configFile);
 		if(_USEEXPANSION == 1) {
@@ -100,12 +109,15 @@ public class SBTDocumentModel implements Serializable {
 	}
 	
 	public void initDeltas() {
-		_wordsDelta = new double[_branchingFactors.length];
-		_docsDelta = new double[_branchingFactors.length];
+		_forwardDelta = new double[_branchingFactors.length];
+		_backwardDelta = new double[_branchingFactors.length];
+		_wordDelta =new double[_branchingFactors.length];
 		double initDelta = 0.9 / (double)_branchingFactors.length;
-		Arrays.fill(_wordsDelta, initDelta);
-		Arrays.fill(_docsDelta, initDelta);
+		Arrays.fill(_wordDelta, initDelta);
+		Arrays.fill(_forwardDelta, initDelta);
+		Arrays.fill(_backwardDelta, initDelta);
 	}
+	
 	
 	public int get_USEEXPANSION() {
 		return _USEEXPANSION;
@@ -270,7 +282,8 @@ public class SBTDocumentModel implements Serializable {
 		}
 		brIn.close();
 	}
-	
+
+
 	private TIntDoubleHashMap aggregateCounts(TIntArrayList occurs) {
 		TIntDoubleHashMap out = new TIntDoubleHashMap();
 		TIntIterator it = occurs.iterator();
@@ -296,11 +309,9 @@ public class SBTDocumentModel implements Serializable {
 		TIntArrayList zs = _c._z[docId];
 		TIntArrayList doc = _c._docs[docId];
 		TIntDoubleHashMap docCts = aggregateCounts(zs);
-		SparseBackoffTree sbtDoc = new SparseBackoffTree(_struct);
 		//System.out.println("adding " + docCts.toString());
-		sbtDoc.addAllMass(docCts, this._docsDelta);
 		for(int i=0; i<doc.size(); i++) {
-			int newZ = sampleZ(docId, i, false, sbtDoc);
+			int newZ = sampleZ(docId, i, false);
 			if(newZ != zs.get(i))
 				changes++;
 			zs.set(i, newZ);
@@ -308,17 +319,49 @@ public class SBTDocumentModel implements Serializable {
 		return changes;
 	}
 	
-	public int sampleZ(int doc, int pos, boolean testing, SparseBackoffTree topicGivenDoc) {
+	public int sampleZ(int doc, int pos, boolean testing) {
 		int w = _c._docs[doc].get(pos);
 		int curZ = _c._z[doc].get(pos);
+		SparseBackoffTree sbtForward = null;
+		if(pos==0) {
+			sbtForward = this._forward[0];
+		}
+		else {
+			sbtForward = this._forward[_c._z[doc].get(pos-1)];
+		}
+		SparseBackoffTree sbtBackward = null;
+		if(pos==_c._docs[doc].size() - 1) {  //don't use if doing forward prediction
+			sbtBackward = this._backward[0];
+		}
+		else {
+			int nextZ = _c._z[doc].get(pos+1);
+			if(nextZ > 0) {
+				sbtBackward = this._backward[nextZ];
+			}
+		}
+		SparseBackoffTree sbtWord = this._wordToState[w]; 
+		
 		double bMarginalInv = 1.0f;
-		if(curZ >= 0)
-			bMarginalInv = 1.0 / _topicMarginal[curZ];
-		SparseBackoffTree [] sbtPair = new SparseBackoffTree [] {topicGivenDoc, _topicGivenWord[w]};
-		double [] subPair = new double [] {1.0, bMarginalInv};
-		if(testing) //don't subtract from word distribution at test time:
-			subPair[1] = 0.0;
-		SparseBackoffTreeIntersection sbti = new SparseBackoffTreeIntersection(sbtPair, curZ, subPair);
+		double wMarginalInv = 1.0f;
+		if(curZ >= 0) {
+			bMarginalInv = 1.0 / this._backwardStateMarginal[curZ];
+			wMarginalInv = 1.0 / this._wordStateMarginal[curZ];
+		}
+		
+		SparseBackoffTree [] sbts;
+		double [] subs;
+		if(sbtBackward != null) {
+			sbts = new SparseBackoffTree [] {sbtForward, sbtWord, sbtBackward};
+			subs = new double [] {1.0, wMarginalInv, bMarginalInv};
+		}
+		else {
+			sbts = new SparseBackoffTree [] {sbtForward, sbtWord};
+			subs = new double [] {1.0, wMarginalInv};
+		}
+		if(testing) //don't subtract at test time:
+			subs = null;
+		
+		SparseBackoffTreeIntersection sbti = new SparseBackoffTreeIntersection(sbts, curZ, subs);
 		return sbti.sample(_r);
 	}
 	
@@ -342,32 +385,73 @@ public class SBTDocumentModel implements Serializable {
 				_c._z[i].add(_r.nextInt(maxVal));
 		}
 	}
-	
-	public TIntDoubleHashMap [] aggregateWordCounts() {
-		TIntDoubleHashMap [] hm = new TIntDoubleHashMap[_c._VOCABSIZE];
+
+	/**
+	 * Returns a an array of sparse hash maps, one for each X, saying how many times the X maps to each state.
+	 * if from = -1 then X = previous state (get state-to-next-state counts)
+	 * if from = 0 then X = words (get word-to-state counts)
+	 * if from = 1 then X = next state (get state-to-previous-state counts)
+	 * @param from  See above
+	 * @return
+	 */
+	public TIntDoubleHashMap [] aggregateCounts(int from) {
+		TIntDoubleHashMap [] hm;
+		if(from==0)
+			hm = new TIntDoubleHashMap[_c._VOCABSIZE];
+		else
+			hm = new TIntDoubleHashMap[_struct.numLeaves()];
+		
 		for(int i=0; i<_c._z.length; i++) {
 			for(int j=0; j<_c._z[i].size(); j++) {
-				int wordID = _c._docs[i].get(j);
+				int xID = -1;
+				if(from == -1) {
+					if(j==0) {
+						xID = 0;
+					}
+					else {
+						xID = _c._z[i].get(j-1);
+					}					
+				}
+				else if(from == 1) {
+					if(j==_c._z[i].size()-1) {
+						xID = 0;
+					}
+					else {
+						xID = _c._z[i].get(j+1);
+					}
+				}
+				else {
+					xID = _c._docs[i].get(j);
+				}
 				int z = _c._z[i].get(j);
-				if(hm[wordID] == null)
-					hm[wordID] = new TIntDoubleHashMap();
-				hm[wordID].adjustOrPutValue(z, 1.0, 1.0);
+				if(hm[xID] == null)
+					hm[xID] = new TIntDoubleHashMap();
+				hm[xID].adjustOrPutValue(z, 1.0, 1.0);
 			}
 		}
 		return hm;
 	}
 	
-	
-	
-	public SparseBackoffTree [] getWordParamsFromZs(double [] dsWords) {
-		SparseBackoffTree [] out = new SparseBackoffTree[_c._VOCABSIZE];
-		for(int i=0; i<_c._VOCABSIZE; i++) {
+	/**
+	 * Returns sbts with given discounts of given type based on current sampler state
+	 * if from = -1 then returns forward parameters
+	 * if from = 0 then returns word-to-state parameters
+	 * if from = 1 then backward parameters
+	 * @param dsWords	The discounts to use in the returned parameters
+	 * @param from	see above
+	 * @return
+	 */
+	public SparseBackoffTree [] gePParamsFromZs(double [] dsWords, int from) {
+		//aggregate:
+		TIntDoubleHashMap [] hm = aggregateCounts(from);
+		SparseBackoffTree [] out = new SparseBackoffTree[hm.length];
+		
+		for(int i=0; i<hm.length; i++) {
 			out[i] = new SparseBackoffTree(_struct);
 		}
-		//aggregate:
-		TIntDoubleHashMap [] hm = aggregateWordCounts();
+		
 		//add:
-		for(int i=0; i<_c._VOCABSIZE; i++) {
+		for(int i=0; i<hm.length; i++) {
 			if(hm[i] == null)
 				continue;
 			TIntDoubleIterator it = hm[i].iterator();
@@ -381,22 +465,18 @@ public class SBTDocumentModel implements Serializable {
 		return out;
 	}
 	
-	public static double [] interpolateEndPoints(double [] endPts, int length) {
-		double [] out = new double[length];
-		double delt = (endPts[1] - endPts[0])/(double)(length*length - 1);
-		for(int i=0; i<length; i++) {
-			out[i] = delt*i*i + endPts[0];
-		}
-		return out;
-	}
-	
-	//reads the corpus and initializes zs and model
+	/**
+	 * reads the corpus and initializes zs and model
+	 * @param inFile
+	 * @param maxVal
+	 * @return
+	 * @throws Exception
+	 */
 	public int initializeForCorpus(String inFile, int maxVal) throws Exception {
 		int toks = _c.readCorpusDat(inFile, true);
 		setThreadBreaks();
 		initZRandom(_c._docs, maxVal);
 		updateModel();
-		//updateWordParamsFromZs(interpolateEndPoints(this._wordsDeltaEndPts, _branchingFactors.length));
 		return toks;
 	}
 	
@@ -483,6 +563,7 @@ public class SBTDocumentModel implements Serializable {
 	 */
     public void updateModel() {
 		System.out.println("first doc samples: " + _c._z[0].toString());
+		
     	_topicGivenWord = getWordParamsFromZs(_wordsDelta);
 		_topicMarginal = getNormalizers(_topicGivenWord, _struct);
 		for(int i=0; i<_topicGivenWord.length; i++) 
@@ -1026,4 +1107,5 @@ public class SBTDocumentModel implements Serializable {
 		}
 	}
 
+	
 }
