@@ -998,7 +998,7 @@ public class SBTDocumentModel implements Serializable {
 				bwOut.write("\r\n");
 			}
 		}
-		
+		bwOut.close();
 	}
 	
 	public static void main(String[] args) throws Exception {
