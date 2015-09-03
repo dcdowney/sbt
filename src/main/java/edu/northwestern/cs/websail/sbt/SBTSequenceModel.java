@@ -321,7 +321,7 @@ public class SBTSequenceModel implements Serializable {
 			sbtForward = this._forward[_c._z[doc].get(pos-1)];
 		}
 		SparseBackoffTree sbtBackward = null;
-		boolean forward = (testing && (pos==_c._docs[doc].size() - 1 || _c._docs[doc].get(pos)==-1)); 
+		boolean forward = (testing && (pos==_c._docs[doc].size() - 1 || _c._z[doc].get(pos+1)==-1)); 
 		if(!forward) { //don't use backward distribution if doing forward prediction
 			if(pos==_c._docs[doc].size() - 1) {  
 				sbtBackward = this._backward[0];
@@ -355,7 +355,11 @@ public class SBTSequenceModel implements Serializable {
 		if(testing) //don't subtract at test time:
 			subs = null;
 		
-		SparseBackoffTreeIntersection sbti = new SparseBackoffTreeIntersection(sbts, curZ, subs);
+		SparseBackoffTreeIntersection sbti;
+		if(subs!=null) 
+			sbti = new SparseBackoffTreeIntersection(sbts, curZ, subs);
+		else
+			sbti = new SparseBackoffTreeIntersection(sbts);
 		return sbti.sample(_r);
 	}
 	
@@ -914,7 +918,7 @@ public class SBTSequenceModel implements Serializable {
 				
 				//resample everything before:
 				for(int k=0; k<i; k++) {
-					int r = sampleZ(doc, i, true);
+					int r = sampleZ(doc, k, true);
 					_c._z[doc].set(k, r);
 				}
 				
@@ -925,7 +929,7 @@ public class SBTSequenceModel implements Serializable {
 					double checkSum = 0.0f;
 					int prev = 0;
 					if(i > 0)
-						prev = words.get(i-1);
+						prev = _c._z[doc].get(i-1);
 					for(int t=0;t<wordTopicMarginal.length; t++) {
 						//dividing by wordTopicMarginal ensures we use a distribution P(w | t) that sums to one
 						
@@ -939,7 +943,7 @@ public class SBTSequenceModel implements Serializable {
 						if(p < 0.0)
 							System.err.println("negative.");
 					}
-					if((i==0 || (i== _c._docs[doc].size()-1)) && (CHECKSUMTOONE)) {
+					if(j==0 && (i==0 || (i== _c._docs[doc].size()-1)) && (CHECKSUMTOONE)) {
 						float sDoc = 0.0f;
 						float sWord = 0.0f;
 						float totalTopicMarginal = 0.0f;
@@ -1042,7 +1046,8 @@ public class SBTSequenceModel implements Serializable {
 	
 	public static void test(String modelFile, String inputFile, int numDocsInFile, int numDocsToTest, String configFile) throws Exception {
 		double [] ll = testModel(modelFile, inputFile, numDocsInFile, numDocsToTest, configFile);
-		System.out.println("Test ppl: " + Arrays.toString(ll));
+		System.out.println("Test LL: " + Arrays.toString(ll));
+		System.out.println("ppl: " + Math.exp(-ll[0]/ll[1]));
 	}
 	
 	/**
