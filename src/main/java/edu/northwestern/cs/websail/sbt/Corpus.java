@@ -18,6 +18,7 @@ public class Corpus implements Serializable {
 	public int _NUMTOKENS = -1;
 	TIntArrayList [] _docs; //the words
 	TIntArrayList [] _z; //the topic variable assignments  //TODO: think about factoring out
+	TIntArrayList [] _scratchZ; //accumulator for new zs
 	double [] _pWord; //marginal word prob
 
 	//returns number of docs
@@ -61,8 +62,14 @@ public class Corpus implements Serializable {
 		TIntArrayList al = new TIntArrayList(featVals.length);
 		for(int i=0; i<featVals.length; i++) {
 			String [] featVal = featVals[i].split(":");
+			int val;
+			if(featVal.length==1) { //implicit 1
+				val = 1;
+			}
+			else{
+				 val = Integer.parseInt(featVal[1]);
+			}
 			int feat = Integer.parseInt(featVal[0]);
-			int val = Integer.parseInt(featVal[1]);
 			for(int j=0; j<val; j++) {
 				al.add(feat);
 			}
@@ -71,7 +78,7 @@ public class Corpus implements Serializable {
 	}
 
 	
-	//keeps word distributions, but re-sets docs, counts, and z's for new corpus
+	//HACK: keeps word distributions, but re-sets docs, counts, and z's for new corpus
 		//takes in number of docs in new corpus
 		//keeps topicMarginal and _pWord fixed
 		public void reInitForCorpus(String testFile, int numDocs) throws Exception {

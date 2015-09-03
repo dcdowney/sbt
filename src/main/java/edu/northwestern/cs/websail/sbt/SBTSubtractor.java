@@ -11,7 +11,8 @@ public class SBTSubtractor {
 	//NOTE!!  Performs an approximation to the true subtraction, because takes from leaf-most smoothers even if not all contributed by the skipLeaf 
 	public SBTSubtractor(SparseBackoffTree sbt, int skipLeaf, double amountToSubtract) {
 		_leafIdx = skipLeaf;
-
+		if(sbt == null)
+			System.out.println("here.");
 		SparseBackoffTreeStructure struct = sbt._struct;
 		_localIdx = struct.getLocalIdxTrace(skipLeaf);
 		double [] curSmoothers = struct.getDiscountTrace(_localIdx);
