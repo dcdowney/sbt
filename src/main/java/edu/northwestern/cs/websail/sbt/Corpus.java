@@ -15,7 +15,7 @@ public class Corpus implements Serializable {
 	
 	public int _VOCABSIZE = -1;  
 	public int _NUMDOCS = -1;
-	public int _NUMTOKENS = -1;
+	public long _NUMTOKENS = -1;
 	TIntArrayList [] _docs; //the words
 	TIntArrayList [] _z; //the topic variable assignments  //TODO: think about factoring out
 	TIntArrayList [] _scratchZ; //accumulator for new zs

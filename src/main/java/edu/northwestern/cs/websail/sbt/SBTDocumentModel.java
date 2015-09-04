@@ -31,7 +31,7 @@ public class SBTDocumentModel implements Serializable {
 	private class GibbsDoer implements Runnable {
     	int _start;
     	int _end;
-    	int _changes = 0;
+    	long _changes = 0;
     	
     	public void run() {
     		_changes = sampleRange(_start, _end);
@@ -168,11 +168,11 @@ public class SBTDocumentModel implements Serializable {
 		this._c._NUMDOCS = _NUMDOCS;
 	}
 
-	public int get_NUMTOKENS() {
+	public long get_NUMTOKENS() {
 		return _c._NUMTOKENS;
 	}
 
-	public void set_NUMTOKENS(int _NUMTOKENS) {
+	public void set_NUMTOKENS(long _NUMTOKENS) {
 		this._c._NUMTOKENS = _NUMTOKENS;
 	}
 
@@ -210,8 +210,8 @@ public class SBTDocumentModel implements Serializable {
 
 	private void setThreadBreaks() {
 		_THREADBREAKS = new int[_NUMTHREADS];
-		int approxToks = _c._NUMTOKENS / _NUMTHREADS;
-		int ct = 0;
+		long approxToks = _c._NUMTOKENS / (long)_NUMTHREADS;
+		long ct = 0;
 		int thread = 0;
 		for(int i=0; i<_c._NUMDOCS; i++ ) {
 			ct += _c._docs[i].size();
@@ -322,12 +322,12 @@ public class SBTDocumentModel implements Serializable {
 		return sbti.sample(_r);
 	}
 	
-    private int sampleRange(int start, int end) {
+    private long sampleRange(int start, int end) {
     	
-    	int chg = 0;
+    	long chg = 0;
     	
 		for(int i=start; i<=end; i++) {
-			chg += sampleDoc(i);
+			chg += (long)sampleDoc(i);
 		}
 
 		return chg;
