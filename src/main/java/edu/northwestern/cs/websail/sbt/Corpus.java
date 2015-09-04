@@ -27,7 +27,7 @@ public class Corpus implements Serializable {
 				new InputStreamReader(new FileInputStream(inFile), "UTF8" ));
 		String sLine;
 		int i=0;
-		int toks = 0;
+		long toks = 0L;
 		ArrayList<TIntArrayList> aldocs = new ArrayList<TIntArrayList>();
 		if (updatePWord)
 			_pWord = new double[_VOCABSIZE];
@@ -40,7 +40,7 @@ public class Corpus implements Serializable {
 					_pWord[it.next()]++;
 				}
 			}
-			toks += ll.size();
+			toks += (long)ll.size();
 		}
 		brIn.close();
 		System.out.println("Tokens: " + toks);
