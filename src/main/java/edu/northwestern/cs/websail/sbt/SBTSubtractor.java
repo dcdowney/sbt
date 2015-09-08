@@ -15,9 +15,11 @@ public class SBTSubtractor {
 			System.out.println("here.");
 		SparseBackoffTreeStructure struct = sbt._struct;
 		_localIdx = struct.getLocalIdxTrace(skipLeaf);
+//		if(amountToSubtract == 0.0) {
+//			_smoother = new double[_localIdx.length];
+//		}
 		double [] curSmoothers = struct.getDiscountTrace(_localIdx);
 		double [] curTotals = sbt.getTotalsTrace(_localIdx);
-		
 		_smoother = new double[curSmoothers.length];
 		_total = new double[curTotals.length];
 		if(curTotals[curTotals.length - 1] < amountToSubtract) {
@@ -47,7 +49,8 @@ public class SBTSubtractor {
 			return null;
 		SBTSubtractor [] out = new SBTSubtractor[sbts.length];
 		for(int i=0; i<sbts.length; i++) {
-			if(amountsToSubtract[i] > 0.0)
+			//if(amountsToSubtract[i] > 0.0)
+			if(sbts[i] != null)
 				out[i] = new SBTSubtractor(sbts[i], skipLeaf, amountsToSubtract[i]);
 		}
 		return out;

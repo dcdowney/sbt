@@ -272,8 +272,10 @@ public class SparseBackoffTree {
 		SparseBackoffTree sbt = this;
 		out[0] = sbt._totalMass;
 		for(int i=0; i<out.length - 1; i++) {
-			if(sbt == null)
-				System.err.println("null");
+			if(sbt == null) {
+				out[i+1] = 0.0;
+				continue;
+			}
 			out[i+1] = sbt._childMass[localIdxTrace[i]];
 			if(i < out.length - 2)
 				sbt = sbt._children[localIdxTrace[i]];

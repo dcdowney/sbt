@@ -87,6 +87,8 @@ public class SBTSequenceModel implements Serializable {
 	private int [] _EXPANSIONSCHEDULE = null; //specifies indexes of branching factor to introduce incrementally
 	private int _USEEXPANSION = 1; //1 for yes, 0 for no
 	private int [] _expansionBranchFactors = null; //when expansion is used, holds the full branching factors
+	private final boolean _SAMPLEONSAMPLES = true;
+	
 	
 	//testing config:
 	private int _NUMPARTICLES = -1;
@@ -318,7 +320,11 @@ public class SBTSequenceModel implements Serializable {
 			sbtForward = this._forward[0];
 		}
 		else {
-			sbtForward = this._forward[_c._z[doc].get(pos-1)];
+			if(!testing && _SAMPLEONSAMPLES) { //HACK:we must sample forward for this to work
+				sbtForward = this._forward[_c._scratchZ[doc].get(pos-1)];
+			}
+			else 
+				sbtForward = this._forward[_c._z[doc].get(pos-1)];
 		}
 		SparseBackoffTree sbtBackward = null;
 		boolean forward = (testing && (pos==_c._docs[doc].size() - 1 || _c._z[doc].get(pos+1)==-1)); 
@@ -334,7 +340,11 @@ public class SBTSequenceModel implements Serializable {
 			}
 		}
 		SparseBackoffTree sbtWord = this._wordToState[w]; 
-		
+		boolean unseen = false;
+		//if unseen, using simple smoothing distribution for the purpose of sampling:
+		if(sbtWord._totalMass == 0.0) {
+			unseen = true;
+		}
 		double bMarginalInv = 1.0f;
 		double wMarginalInv = 1.0f;
 		if(curZ >= 0) {
@@ -345,22 +355,38 @@ public class SBTSequenceModel implements Serializable {
 		SparseBackoffTree [] sbts;
 		double [] subs;
 		if(!forward) {
-			sbts = new SparseBackoffTree [] {sbtForward, sbtWord, sbtBackward};
-			subs = new double [] {1.0, wMarginalInv, bMarginalInv};
+			if(unseen) {
+				sbts = new SparseBackoffTree [] {sbtForward, sbtBackward};
+				subs = new double [] {1.0, wMarginalInv};
+			}
+			else {
+				sbts = new SparseBackoffTree [] {sbtForward, sbtWord, sbtBackward};
+				subs = new double [] {1.0, wMarginalInv, bMarginalInv};
+			}
 		}
 		else {
-			sbts = new SparseBackoffTree [] {sbtForward, sbtWord};
-			subs = new double [] {1.0, wMarginalInv};
+			if(unseen) {
+				sbts = new SparseBackoffTree [] {sbtForward};
+				subs = new double [] {1.0};
+			}
+			else {
+				sbts = new SparseBackoffTree [] {sbtForward, sbtWord};
+				subs = new double [] {1.0, wMarginalInv};
+			}
 		}
 		if(testing) //don't subtract at test time:
 			subs = null;
-		
+		if(!testing && _SAMPLEONSAMPLES && pos > 0) {
+			if(_c._z[doc].get(pos-1)==_c._scratchZ[doc].get(pos-1))
+				subs[0] = 0.0;
+		}
 		SparseBackoffTreeIntersection sbti;
 		if(subs!=null) 
 			sbti = new SparseBackoffTreeIntersection(sbts, curZ, subs);
 		else
 			sbti = new SparseBackoffTreeIntersection(sbts);
-		return sbti.sample(_r);
+		int sample = sbti.sample(_r);
+		return sample;
 	}
 	
     private long sampleRange(int start, int end) {
@@ -569,7 +595,7 @@ public class SBTSequenceModel implements Serializable {
 	 * Updates the model given the topic assignments (_z) and divides by marginal for next sampling pass
 	 */
     public void updateModel(TIntArrayList [] zs) {
-		System.out.println("first doc samples: " + _c._z[0].toString());
+		System.out.println("first doc samples: " + zs[0].toString());
 		this._forward = getParamsFromZs(_forwardDelta, -1, zs, _c._docs);
 		this._backward = getParamsFromZs(_backwardDelta, 1, zs, _c._docs);
 		this._wordToState = getParamsFromZs(_wordDelta, 0, zs, _c._docs);
@@ -797,6 +823,11 @@ public class SBTSequenceModel implements Serializable {
         	gradientStep(_wordDelta, hm, step, false);
         	step *= STEPDEC;
     	}
+    	long totalparams = 0L;
+    	for(TIntDoubleHashMap i : hm) {
+    		if(i != null)
+    			totalparams += i.size();
+    	}
     	hm = aggregateCounts(-1, zs, _c._docs);
     	System.out.println("forward:");
     	step = STEPSIZE;
@@ -814,6 +845,7 @@ public class SBTSequenceModel implements Serializable {
     	System.out.println("full word params: " + Arrays.toString(_wordDelta));
     	System.out.println("full forward params: " + Arrays.toString(_forwardDelta));
     	System.out.println("full forward params: " + Arrays.toString(_backwardDelta));
+    	System.out.println("total nonzero word-state params: " + totalparams);
     }
     
     /**
@@ -848,8 +880,9 @@ public class SBTSequenceModel implements Serializable {
      *
      * @param  iterations  the number of Gibbs passes to perform
      * @param  updateInterval	number of iterations between hyperparameter updates
+     * @param  outFile   writes model to here before each expansion
      */
-	public void trainModel(int iterations, int updateInterval) {
+	public void trainModel(int iterations, int updateInterval, String outFile) throws Exception {
 		boolean done = false;
 		int j=0;
 		int maxVal = _struct.numLeaves();
@@ -865,6 +898,7 @@ public class SBTSequenceModel implements Serializable {
 				_c._z = _c._scratchZ;
 			}
 			if(this._USEEXPANSION == 1) {
+				writeModel(outFile + "." + j);
 				j++;
 				done = !expandModel(j);
 			}
@@ -979,7 +1013,7 @@ public class SBTSequenceModel implements Serializable {
 	public static void train(String inputFile, String outputFile, String configFile) throws Exception {
 		SBTSequenceModel sbtsm = new SBTSequenceModel(configFile);
 		sbtsm.initializeForCorpus(inputFile, sbtsm._struct.numLeaves());
-		sbtsm.trainModel(sbtsm._NUMITERATIONS, sbtsm._OPTIMIZEINTERVAL);
+		sbtsm.trainModel(sbtsm._NUMITERATIONS, sbtsm._OPTIMIZEINTERVAL, outputFile);
 		sbtsm.writeModel(outputFile);
 	}
 	
