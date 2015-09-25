@@ -13,6 +13,8 @@ public class SparseBackoffTreeIntersection {
 	
 	//subtractor for skipleaf:
 	SBTSubtractor [] _subs;
+
+	SparseBackoffTreeStructure _struct;
 	
 	//output intersection structures:
 	SparseBackoffTreeIntersection [] _childSbtis;
@@ -20,43 +22,98 @@ public class SparseBackoffTreeIntersection {
 	double [] _childMass;
 	double [] _siblingMass;
 	double _totalMass;
+	boolean _withoutZeros;
 	
-	public SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect) {
-		this(sbtsToIntersect, -1, null);
+	public SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect, boolean withoutZeros) {
+		this(sbtsToIntersect, -1, null, withoutZeros);
 	}
 	
+	public SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect) {
+		this(sbtsToIntersect, false);
+	}
 	
 	//if skipLeaf < 1, means no skipLeaf
 	public SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect, int skipLeaf, double [] amountsToSubtract) {
-		this(sbtsToIntersect, skipLeaf, 0, amountsToSubtract);
+		this(sbtsToIntersect, skipLeaf, amountsToSubtract, false);
 	}
 	
-	public SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect, int skipLeaf, int smoothMin, double [] amountsToSubtract) {
-		this(sbtsToIntersect, SBTSubtractor.getSubs(sbtsToIntersect, skipLeaf, amountsToSubtract), smoothMin);
+	public SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect, int skipLeaf, double [] amountsToSubtract, boolean withoutZeros) {
+		this(sbtsToIntersect, skipLeaf, 0, amountsToSubtract, withoutZeros);
 	}
 	
-	public SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect, SBTSubtractor [] subs, int smoothMin) {
-		this(sbtsToIntersect, (subs != null), subs, 0, smoothMin);
+	private SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect, int skipLeaf, int smoothMin, double [] amountsToSubtract, boolean withoutZeros) {
+		this(sbtsToIntersect, SBTSubtractor.getSubs(sbtsToIntersect, skipLeaf, amountsToSubtract), smoothMin, withoutZeros);
+	}
+	
+	private SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect, SBTSubtractor [] subs, int smoothMin, boolean withoutZeros) {
+		this(sbtsToIntersect, (subs != null), subs, 0, smoothMin, withoutZeros);
+	}
+	
+	//returns amount to subtract from smooth min
+	private int initialize(SparseBackoffTree [] sbtsToIntersect, SBTSubtractor [] subs, int subsIdx, int smoothMin, boolean withoutZeros) {
+		_sbts = sbtsToIntersect;
+		_subs = subs;
+		_withoutZeros = withoutZeros;
+		_struct = _sbts[0]._struct;
+		
+		boolean [] zero = new boolean[_sbts.length];
+		int newSize = _sbts.length;
+		for(int i=0; i<_sbts.length; i++) {
+			SparseBackoffTree sbt = _sbts[i];
+			if(sbt._totalMass == 0.0) {
+				if(withoutZeros) {
+					zero[i] = true;
+					newSize--;
+				}
+				else {
+					System.err.println("Zero total mass in SBT, indeterminate results.  Consider using withoutZeros=true.");
+				}
+			}
+		}
+		int smoothSubtract = 0;
+		if(newSize != _sbts.length) {
+			_sbts = new SparseBackoffTree[newSize];
+			if(subs != null)
+				_subs = new SBTSubtractor[newSize];
+			int idx = 0;
+			for(int i=0; i<sbtsToIntersect.length; i++) {
+				if(sbtsToIntersect[i]._totalMass>0.0) {
+					if(subs !=null)
+						_subs[idx] = subs[i];
+					_sbts[idx++] = sbtsToIntersect[i];
+				}
+				else if(i < smoothMin)
+					smoothSubtract--;
+			}
+		}
+		
+		smoothMin -= smoothSubtract;
+		_siblingMass = new double[_sbts.length - smoothMin];
+		_siblingSbtis = new SparseBackoffTreeIntersection[_sbts.length - smoothMin];
+		_childMass = new double[sbtsToIntersect[0]._struct._numLeaves.length];
+
+		return smoothSubtract;
 	}
 	
 	//smoothmin gives the minimum element in sbtsToIntersect that can be smoothed at this level
 	//all sbts assumed to have the same number of children (deltas may differ)
 	//sbtsToIntersect assumed to have at least one element
 	//inSub says whether we're down a branch that should do the subtraction
-	public SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect, boolean inSub, SBTSubtractor [] subs, int subsIdx, int smoothMin) {
+	private SparseBackoffTreeIntersection(SparseBackoffTree [] sbtsToIntersect, boolean inSub, SBTSubtractor [] subs, int subsIdx, int smoothMin, boolean withoutZeros) {
 		
-		_sbts = sbtsToIntersect;
-		_subs = subs;
-		_siblingMass = new double[_sbts.length - smoothMin];
-		_siblingSbtis = new SparseBackoffTreeIntersection[_sbts.length - smoothMin];
-		_childMass = new double[sbtsToIntersect[0]._struct._numLeaves.length];
-		
+		smoothMin -= initialize(sbtsToIntersect, subs, subsIdx, smoothMin, withoutZeros);
+		sbtsToIntersect = null;
+		subs= null;
+		if(_sbts.length==0) {//all have zero mass; ignore
+			return;
+		}
+			
 		if(_sbts.length > 1) {
 			for(int i=0; i<_sbts.length - smoothMin; i++) {
 				SparseBackoffTree [] sbtSubset = new SparseBackoffTree[_sbts.length - 1];
 				SBTSubtractor [] subSubset = null;
-				if(subs != null) {
-					subSubset = new SBTSubtractor[subs.length - 1];
+				if(_subs != null) {
+					subSubset = new SBTSubtractor[_subs.length - 1];
 				}
 				int ct = 0;
 				for(int j=0; j<_sbts.length; j++) {
@@ -67,10 +124,10 @@ public class SparseBackoffTreeIntersection {
 						sbtSubset[ct++] = _sbts[j];
 					}
 				}
-				_siblingSbtis[i] = new SparseBackoffTreeIntersection(sbtSubset, inSub, subSubset, subsIdx, i + smoothMin);
+				_siblingSbtis[i] = new SparseBackoffTreeIntersection(sbtSubset, inSub, subSubset, subsIdx, i + smoothMin, withoutZeros);
 				double smoothSubtract = 0.0;
-				if(inSub && subs[i] != null) { //subs[i] may be null if we've set subtract amt on this sbt to zero
-					smoothSubtract = subs[i]._smoother[subsIdx];
+				if(inSub && _subs[i] != null) { //subs[i] may be null if we've set subtract amt on this sbt to zero
+					smoothSubtract = _subs[i]._smoother[subsIdx];
 				}
 				_siblingMass[i] = (_sbts[i + smoothMin]._smooth - smoothSubtract) * _siblingSbtis[i]._totalMass;
 				_totalMass += _siblingMass[i];
@@ -81,7 +138,7 @@ public class SparseBackoffTreeIntersection {
 				restIntersectionMass = _siblingSbtis[0]._childMass.clone();
 				prevIntersectionMass = _sbts[smoothMin]._childMass.clone();
 				if(inSub) {
-					prevIntersectionMass[subs[smoothMin]._localIdx[subsIdx]] -= subs[smoothMin]._total[subsIdx+1];
+					prevIntersectionMass[_subs[smoothMin]._localIdx[subsIdx]] -= _subs[smoothMin]._total[subsIdx+1];
 				}
 			}
 			else {
@@ -91,8 +148,8 @@ public class SparseBackoffTreeIntersection {
 				Arrays.fill(prevIntersectionMass, 1.0);
 				for(int j=0; j<=Math.min(smoothMin, _sbts.length - 1); j++) {
 					for(int k=0; k<prevIntersectionMass.length; k++) {
-						if(inSub && subs[j]._localIdx[subsIdx]==k) {
-							prevIntersectionMass[k] *= _sbts[j]._childMass[k] - subs[j]._total[subsIdx+1];
+						if(inSub && _subs[j]._localIdx[subsIdx]==k) {
+							prevIntersectionMass[k] *= _sbts[j]._childMass[k] - _subs[j]._total[subsIdx+1];
 						}
 						else {
 							prevIntersectionMass[k] *= _sbts[j]._childMass[k];
@@ -117,13 +174,13 @@ public class SparseBackoffTreeIntersection {
 				_childSbtis = new SparseBackoffTreeIntersection[restIntersectionMass.length];
 				for(int j=0; j<restIntersectionMass.length; j++) {
 					if(restIntersectionMass[j] > 0.0 && prevIntersectionMass[j] > 0.0) {
-						SparseBackoffTree [] childSbts = new SparseBackoffTree[sbtsToIntersect.length];
+						SparseBackoffTree [] childSbts = new SparseBackoffTree[_sbts.length];
 						
 						for(int k=0; k<childSbts.length; k++) {
-							childSbts[k] = sbtsToIntersect[k]._children[j];
+							childSbts[k] = _sbts[k]._children[j];
 						}
-						_childSbtis[j] = new SparseBackoffTreeIntersection(childSbts, (inSub && subs[0]._localIdx[subsIdx]==j),
-								subs, subsIdx+1, 0);
+						_childSbtis[j] = new SparseBackoffTreeIntersection(childSbts, (inSub && _subs[0]._localIdx[subsIdx]==j),
+								_subs, subsIdx+1, 0, withoutZeros);
 						_childMass[j] = _childSbtis[j]._totalMass;
 					}
 					_totalMass += _childMass[j];
@@ -131,7 +188,7 @@ public class SparseBackoffTreeIntersection {
 			}
 			else { //leaf
 				for(int j=0; j<restIntersectionMass.length; j++) {
-					if(inSub && smoothMin < subs.length && subs[smoothMin]._localIdx[subsIdx]==j) {
+					if(inSub && smoothMin < _subs.length && _subs[smoothMin]._localIdx[subsIdx]==j) {
 						_childMass[j] = prevIntersectionMass[j]*restIntersectionMass[j];
 					}
 					else {
@@ -148,14 +205,17 @@ public class SparseBackoffTreeIntersection {
 				_totalMass -= _sbts[0]._smooth * _sbts[0]._struct.numLeaves();
 				_noTopSmooth = true;
 			}
-			if(inSub && subs[0] != null) { //subs[0] may be null if we've set subtract amt on this sbt to zero 
-				_totalMass -= subs[0]._total[subsIdx];
-				_childMass[subs[0]._localIdx[subsIdx]] -= subs[0]._total[subsIdx+1];
+			if(inSub && _subs[0] != null) { //subs[0] may be null if we've set subtract amt on this sbt to zero 
+				_totalMass -= _subs[0]._total[subsIdx];
+				_childMass[_subs[0]._localIdx[subsIdx]] -= _subs[0]._total[subsIdx+1];
 			}
 		}
 	}
 	
 	public int sample(Random r) {
+		if(_sbts.length==0 && _withoutZeros) {
+			return _struct.randomLeaf(r);
+		}
 		double ch = r.nextDouble() * this._totalMass;
 		return selectAt(ch, r, (_subs != null)?0:-1);
 	}
@@ -503,6 +563,74 @@ public class SparseBackoffTreeIntersection {
 		
 	}
 	
+	public static void sbtOfZeroTest() {
+		SparseBackoffTreeStructure struct = new SparseBackoffTreeStructure(new int [] {2, 2, 3});
+		SparseBackoffTree sbt = new SparseBackoffTree(struct);
+		
+		double [] ds = new double [] {0.24, 0.36, 0.3};
+		sbt.smoothAndAddMass(0, 1.0, ds);
+		sbt.smoothAndAddMass(3, 2.0, ds);
+		sbt.smoothAndAddMass(4, 1.0, ds);
+		sbt.smoothAndAddMass(11, 1.0, ds);
+
+		SparseBackoffTree sbt2 = new SparseBackoffTree(struct);
+		System.out.println("sbt mass: " + sbt2._totalMass);
+		
+		ds = new double [] {1.0, 1.0, 1.0};
+		SparseBackoffTree sbt3 = new SparseBackoffTree(struct);
+		sbt3.smoothAndAddMass(0, 3.0, ds);
+		sbt3.smoothAndAddMass(1, 3.0, ds);
+		sbt3.smoothAndAddMass(2, 3.0, ds);
+		sbt3.smoothAndAddMass(3, 3.0, ds);
+		sbt3.smoothAndAddMass(4, 3.0, ds);
+		sbt3.smoothAndAddMass(5, 3.0, ds);
+		sbt3.smoothAndAddMass(6, 2.0, ds);
+		sbt3.smoothAndAddMass(7, 2.0, ds);
+		sbt3.smoothAndAddMass(8, 2.0, ds);
+		sbt3.smoothAndAddMass(9, 2.0, ds);
+		sbt3.smoothAndAddMass(10, 2.0, ds);
+		sbt3.smoothAndAddMass(11, 2.0, ds);
+		System.out.println("sbt mass: " + sbt3._totalMass);
+		TIntIntHashMap hm = sbt3.sampleSet(300000, null);
+		System.out.println(hm.toString());
+		
+		
+		long t = System.currentTimeMillis();
+		SparseBackoffTreeIntersection sbti = new SparseBackoffTreeIntersection(new SparseBackoffTree[] {sbt, sbt2, sbt3}, true);
+		System.out.println("intersection mass: " + sbti._totalMass + " should be approx " + 13.76);
+
+		double [] targets = new double [] {1.38,1.08,1.08,4.68,1.68,1.38,0.28,0.28,0.28,0.48,0.48,0.68};
+		
+		t = System.currentTimeMillis() - t;
+		System.out.println("intersection time elapsed: " + t);
+		int numSamples = 1376000;
+		 t = System.currentTimeMillis();
+		 hm = sbti.sampleSet(numSamples);
+		t = System.currentTimeMillis() - t;
+		System.out.println("sampling time elapsed: " + t);
+		System.out.println("samples: " + numSamples);
+		System.out.println(hm.toString());
+		TIntIntIterator it = hm.iterator();
+		int [] cts = new int[12];
+		while(it.hasNext()) {
+			it.advance();
+			cts[it.key()] = it.value();
+		}
+		
+		System.out.println("val\tactual\texpected");
+		
+		for(int i=0; i<targets.length; i++) {
+			double actual = cts[i];
+			double expected = (targets[i]*((double)numSamples/13.76));
+			System.out.print(i + "\t" + actual + "\t" + expected);
+			if((actual - expected)/expected > 0.008)
+				System.out.println("\tFAIL");
+			else
+				System.out.println("\tSUCCESS");
+				
+		}		
+	}
+	
 	/**
 	 * @param args
 	 */
@@ -512,6 +640,7 @@ public class SparseBackoffTreeIntersection {
 //		testTwo();
 //		tinyArrayTest();
 		testThree();
+		sbtOfZeroTest();
 	}
 
 }

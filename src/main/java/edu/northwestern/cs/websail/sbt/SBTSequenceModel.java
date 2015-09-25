@@ -320,7 +320,7 @@ public class SBTSequenceModel implements Serializable {
 			sbtForward = this._forward[0];
 		}
 		else {
-			if(!testing && _SAMPLEONSAMPLES) { //HACK:we must sample forward for this to work
+			if(!testing && _SAMPLEONSAMPLES) { //HACK:we must sample left-to-right for this to work
 				sbtForward = this._forward[_c._scratchZ[doc].get(pos-1)];
 			}
 			else 
@@ -382,9 +382,9 @@ public class SBTSequenceModel implements Serializable {
 		}
 		SparseBackoffTreeIntersection sbti;
 		if(subs!=null) 
-			sbti = new SparseBackoffTreeIntersection(sbts, curZ, subs);
+			sbti = new SparseBackoffTreeIntersection(sbts, curZ, subs, true);
 		else
-			sbti = new SparseBackoffTreeIntersection(sbts);
+			sbti = new SparseBackoffTreeIntersection(sbts, true);
 		int sample = sbti.sample(_r);
 		return sample;
 	}
@@ -595,6 +595,7 @@ public class SBTSequenceModel implements Serializable {
 	 * Updates the model given the topic assignments (_z) and divides by marginal for next sampling pass
 	 */
     public void updateModel(TIntArrayList [] zs) {
+    	System.out.println("arch: " + Arrays.toString(this._branchingFactors));
 		System.out.println("first doc samples: " + zs[0].toString());
 		this._forward = getParamsFromZs(_forwardDelta, -1, zs, _c._docs);
 		this._backward = getParamsFromZs(_backwardDelta, 1, zs, _c._docs);
@@ -844,7 +845,7 @@ public class SBTSequenceModel implements Serializable {
     	}
     	System.out.println("full word params: " + Arrays.toString(_wordDelta));
     	System.out.println("full forward params: " + Arrays.toString(_forwardDelta));
-    	System.out.println("full forward params: " + Arrays.toString(_backwardDelta));
+    	System.out.println("full backward params: " + Arrays.toString(_backwardDelta));
     	System.out.println("total nonzero word-state params: " + totalparams);
     }
     
@@ -968,9 +969,14 @@ public class SBTSequenceModel implements Serializable {
 						//dividing by wordTopicMarginal ensures we use a distribution P(w | t) that sums to one
 						
 						pWordGivenState[t] = _wordToState[w].getSmoothed(t) / wordTopicMarginal[t];
+						if(this._forward[prev]._totalMass > 0.0) {
 						double numt = this._forward[prev].getSmoothed(t);
 						checkSum += numt;
 						pStateGivenPrev[t] = numt / this._forward[prev]._totalMass;
+						}
+						else {
+							pStateGivenPrev[t] = 1.0 / (double)pStateGivenPrev.length;
+						}
 						p += (pWordGivenState[t]*pStateGivenPrev[t]);
 						if(Double.isNaN(p))
 							System.err.println("nan.");

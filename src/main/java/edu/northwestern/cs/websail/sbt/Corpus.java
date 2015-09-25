@@ -57,7 +57,11 @@ public class Corpus implements Serializable {
 	
 	public static TIntArrayList lineToList(String sLine) {
 		String [] idFeats = sLine.split("\t");
-		String feats = idFeats[1];
+		String feats;
+		if(idFeats.length > 1) 
+			feats = idFeats[1];
+		else
+			feats = idFeats[0];
 		String [] featVals = feats.split(" ");
 		TIntArrayList al = new TIntArrayList(featVals.length);
 		for(int i=0; i<featVals.length; i++) {
