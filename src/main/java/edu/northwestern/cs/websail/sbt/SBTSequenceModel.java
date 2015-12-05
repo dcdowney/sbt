@@ -82,16 +82,15 @@ public class SBTSequenceModel implements Serializable {
 							//at 0 implicitly)
 	
 	//training config:
-	private int _NUMITERATIONS = -1;
-	private int _OPTIMIZEINTERVAL = -1;
+	protected int _NUMITERATIONS = -1;
+	protected int _OPTIMIZEINTERVAL = -1;
 	private int [] _EXPANSIONSCHEDULE = null; //specifies indexes of branching factor to introduce incrementally
 	private int _USEEXPANSION = 1; //1 for yes, 0 for no
 	private int [] _expansionBranchFactors = null; //when expansion is used, holds the full branching factors
-	private final boolean _SAMPLEONSAMPLES = true;
-	
+	private final boolean _SAMPLEONSAMPLES = false;
 	
 	//testing config:
-	private int _NUMPARTICLES = -1;
+	protected int _NUMPARTICLES = -1;
 	private int _MAXTESTDOCSIZE = -1;
 	
 	public SBTSequenceModel(String configFile) throws Exception {
@@ -284,7 +283,7 @@ public class SBTSequenceModel implements Serializable {
 	}
 
 
-	private TIntDoubleHashMap aggregateCounts(TIntArrayList occurs) {
+	protected TIntDoubleHashMap aggregateCounts(TIntArrayList occurs) {
 		TIntDoubleHashMap out = new TIntDoubleHashMap();
 		TIntIterator it = occurs.iterator();
 		while(it.hasNext()) {
@@ -293,15 +292,14 @@ public class SBTSequenceModel implements Serializable {
 		}
 		return out;
 	}
-		
+
 	//scans doc, resampling each variable.  Not used at test time.
 	//returns number of changes
-	private int sampleDoc(int docId) {
+	protected int sampleDoc(int docId) {
 		int changes = 0;
 		TIntArrayList zs = _c._z[docId];
 		TIntArrayList scratchZs = _c._scratchZ[docId];
 		TIntArrayList doc = _c._docs[docId];
-		TIntDoubleHashMap docCts = aggregateCounts(zs);
 		//System.out.println("adding " + docCts.toString());
 		for(int i=0; i<doc.size(); i++) {
 			int newZ = sampleZ(docId, i, false);
