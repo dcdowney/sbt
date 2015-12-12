@@ -2,6 +2,7 @@ package edu.northwestern.cs.websail.sbt;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStreamReader;
@@ -55,6 +56,23 @@ public class SBTSequenceModel implements Serializable {
     	}
     }
 
+    public static class TestEnsembleDoer implements Runnable {
+    	int _doc;
+    	double [][] _wordTopicMarginal;
+    	SBTSequenceModel [] _sbtsm;
+    	double [] _res;
+    	
+    	public TestEnsembleDoer(int i, double [][] wordTopicMarginal, SBTSequenceModel [] models) {
+    		_doc = i;
+    		_wordTopicMarginal = wordTopicMarginal;
+    		_sbtsm = models;
+    	}
+    	
+    	public void run() {
+    		_res = testEnsembleOnDocFullPpl(_doc, _wordTopicMarginal, _sbtsm);
+    		System.out.println(_doc + "\t" + _res[0] + "\t" + _res[1]);
+    	}
+    }
 	
 	//Model information:
     //state index zero is special start-of-sentence state
@@ -594,7 +612,7 @@ public class SBTSequenceModel implements Serializable {
 	 */
     public void updateModel(TIntArrayList [] zs) {
     	System.out.println("arch: " + Arrays.toString(this._branchingFactors));
-		System.out.println("first doc samples: " + zs[0].toString());
+		System.out.println("second doc samples: " + zs[1].toString());
 		this._forward = getParamsFromZs(_forwardDelta, -1, zs, _c._docs);
 		this._backward = getParamsFromZs(_backwardDelta, 1, zs, _c._docs);
 		this._wordToState = getParamsFromZs(_wordDelta, 0, zs, _c._docs);
@@ -933,6 +951,76 @@ public class SBTSequenceModel implements Serializable {
 		return out;
 	}
 	
+	public static double [] testEnsembleOnDocFullPpl(int doc, double [][] wordTopicMarginal, SBTSequenceModel [] ms) {
+		double LL = 0.0;
+		double [][] ps = new double[ms.length][ms[0]._c._docs[doc].size()]; //dims [model][token]
+		for(int m=0; m<ms.length; m++) {
+			for(int j=0; j<ms[m]._NUMPARTICLES; j++) {
+				TIntArrayList words = ms[m]._c._docs[doc];
+				for(int i=0; i<words.size(); i++) {
+					ms[m]._c._z[doc].set(i, -1);
+				}
+				for(int i=0; i<words.size(); i++) {
+					int w = words.get(i);
+					double p = 0.0;						
+					
+					//resample everything before:
+					for(int k=0; k<i; k++) {
+						int r = ms[m].sampleZ(doc, k, true);
+						ms[m]._c._z[doc].set(k, r);
+					}
+					
+					if(ms[m]._c._pWord[w]>0.0) {
+						//test on this word:
+						double [] pWordGivenState = new double[wordTopicMarginal[m].length];
+						double [] pStateGivenPrev = new double[wordTopicMarginal[m].length];
+						int prev = 0;
+						if(i > 0)
+							prev = ms[m]._c._z[doc].get(i-1);
+						for(int t=0;t<wordTopicMarginal[m].length; t++) {
+							//dividing by wordTopicMarginal ensures we use a distribution P(w | t) that sums to one
+							
+							pWordGivenState[t] = ms[m]._wordToState[w].getSmoothed(t) / wordTopicMarginal[m][t];
+							if(ms[m]._forward[prev]._totalMass > 0.0) {
+								double numt = ms[m]._forward[prev].getSmoothed(t);
+								pStateGivenPrev[t] = numt / ms[m]._forward[prev]._totalMass;
+							}
+							else {
+								pStateGivenPrev[t] = 1.0 / (double)pStateGivenPrev.length;
+							}
+							p += (pWordGivenState[t]*pStateGivenPrev[t]);
+							if(Double.isNaN(p))
+								System.err.println("nan.");
+							if(p < 0.0)
+								System.err.println("negative.");
+						}
+						ps[m][i] += p;
+					}
+					//sample this word:
+					int r = ms[m].sampleZ(doc, i, true);
+					ms[m]._c._z[doc].set(i, r);
+				}
+			}
+		}
+		double numWords = 0.0;
+		double [] ensembleps = new double[ms[0]._c._docs[doc].size()];
+		for(int m=0; m < ms.length; m++) {
+			for(int i=0; i<ms[m]._c._docs[doc].size(); i++) {
+				ensembleps[i] += ps[m][i]/((double)ms[m]._NUMPARTICLES * (double)ms.length);
+			}
+		}
+		
+		for(int i=0; i<ms[0]._c._docs[doc].size(); i++) {
+			int w = ms[0]._c._docs[doc].get(i);
+			if(ms[0]._c._pWord[w] > 0) {
+				numWords++;
+				LL += Math.log(ensembleps[i]);
+				if(Double.isNaN(LL))
+					System.out.println("got NaN with " + ensembleps[i]);
+			}
+		}
+		return new double [] {LL, numWords};		
+	}
 	
 	//tests on a single document using left-to-right method
 	//word topic marginal (i.e. P(topic) computed from P(topic, word)) is supplied to ensure evaluated distribution sums to one
@@ -1019,6 +1107,63 @@ public class SBTSequenceModel implements Serializable {
 		sbtsm.initializeForCorpus(inputFile, sbtsm._struct.numLeaves());
 		sbtsm.trainModel(sbtsm._NUMITERATIONS, sbtsm._OPTIMIZEINTERVAL, outputFile);
 		sbtsm.writeModel(outputFile);
+	}
+
+	//computes log likelihood of model using left-to-right method
+	//returns {ppl, number of tested words}
+	//numDocs is number in test file
+	//maxDocs is number actually tested (starting from the beginning of the file)
+	public static double [] testEnsemble(File [] modelFile, String testFile, int numDocs, int maxDocs, String configFile) throws Exception {
+		SBTSequenceModel [] sbtsm = new SBTSequenceModel[modelFile.length];
+		for(int i=0; i< sbtsm.length; i++) {
+			sbtsm[i] = readModel(modelFile[i].getAbsolutePath());
+			sbtsm[i].readConfigFile(configFile);
+		}
+		
+		double [][] wordStateNormalizer = new double[modelFile.length][];
+		int [] numStates = new int[sbtsm.length];
+		for(int i=0; i< sbtsm.length; i++) {
+			wordStateNormalizer[i] = getCheckMarginal(sbtsm[i]._wordToState, sbtsm[i]._struct);
+			numStates[i] = wordStateNormalizer[i].length;
+		}
+		
+		
+		for(int i=0; i<sbtsm.length; i++) {
+			sbtsm[i]._c.reInitForCorpus(testFile, numDocs);
+		}
+		double LL = 0.0;
+		double numWords = 0.0;
+		TestEnsembleDoer [] tds = new TestEnsembleDoer[maxDocs];
+		ExecutorService e = Executors.newFixedThreadPool(sbtsm[0]._NUMTHREADS);
+		//ExecutorService e = Executors.newFixedThreadPool(1);
+		for(int i=0; i<tds.length;i++) {
+			if(sbtsm[0]._MAXTESTDOCSIZE < 0 || sbtsm[0]._c._docs[i].size() > sbtsm[0]._MAXTESTDOCSIZE) {
+				System.out.println("skipping " + i + " size " + sbtsm[0]._c._docs[i].size());
+				continue;
+			}
+			tds[i] = new TestEnsembleDoer(i, wordStateNormalizer, sbtsm);
+			e.execute(tds[i]);
+		}
+		e.shutdown();
+		boolean terminated = false;
+		while(!terminated) {
+    		try {
+    			terminated = e.awaitTermination(60,  TimeUnit.SECONDS);
+    		}
+    		catch (InterruptedException ie) {
+    			
+    		}
+		}
+		for(int i=0; i<tds.length; i++) {
+			if(tds[i]==null)
+				continue;
+			LL += tds[i]._res[0];
+			numWords += tds[i]._res[1];
+		}
+		System.out.println("Test LL: " + LL);
+		System.out.println("Words: " + numWords);
+		System.out.println("ppl: " + Math.exp(-LL/numWords));
+		return new double [] {LL, numWords};
 	}
 	
 	//computes log likelihood of model using left-to-right method
@@ -1133,6 +1278,13 @@ public class SBTSequenceModel implements Serializable {
 				System.err.println("Usage: wordreps <model_file> <output_file>");
 			}
 			outputWordToTopicFile(args[1], args[2]);
+		}
+		else if(args.length > 0 && args[0].equalsIgnoreCase("testEns")) {
+			if(args.length != 6) {
+				System.err.println("Usage: test <model_dir> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>");
+			}
+			File f = new File(args[1]);
+			testEnsemble(f.listFiles(), args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3]);			
 		}
 		else {
 			System.err.println("Usage: <train|test|wordreps> <args...>");

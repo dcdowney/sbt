@@ -28,7 +28,7 @@ public class SBTSequenceLDAModel extends SBTSequenceModel {
 	public void initDeltas() {
 		super.initDeltas();
 		_docBagDelta =new double[_branchingFactors.length];
-		Arrays.fill(_docBagDelta, this._forwardDelta[0]); 
+		Arrays.fill(_docBagDelta, this._forwardDelta[0]*20.0); 
 	}
 	
 	public int sampleZ(int doc, int pos, boolean testing, SparseBackoffTree sbtDoc) {
@@ -117,7 +117,7 @@ public class SBTSequenceLDAModel extends SBTSequenceModel {
 			int newZ = sampleZ(docId, i, false, sbtDoc);
 			if(newZ != zs.get(i))
 				changes++;
-			zs.set(i, newZ);
+			this._c._scratchZ[docId].set(i, newZ);
 		}
 		return changes;
 	}
@@ -154,12 +154,14 @@ public class SBTSequenceLDAModel extends SBTSequenceModel {
     	int NUMSTEPS = 10; //number of steps to take
 
     	TIntDoubleHashMap [] hm = aggregateCounts(2, zs, _c._docs);
-    	System.out.println("docs:");
-    	double step = STEPSIZE;
-    	for(int i=0; i<NUMSTEPS; i++) {
-        	gradientStep(_docBagDelta, hm, step, false);
-        	step *= STEPDEC;
-    	}
+    	for(int i=0; i<_docBagDelta.length; i++)
+    		_docBagDelta[i] *= 0.98;
+//    	System.out.println("docs:");
+//    	double step = STEPSIZE;
+//    	for(int i=0; i<NUMSTEPS; i++) {
+//        	gradientStep(_docBagDelta, hm, step, false);
+//        	step *= STEPDEC;
+//    	}
     	long totalparams = 0L;
     	for(TIntDoubleHashMap i : hm) {
     		if(i != null)
@@ -177,12 +179,13 @@ public class SBTSequenceLDAModel extends SBTSequenceModel {
     	super.updateModel(zs);
     	
 		this._forwardStateMarginal = getNormalizers(_forward, _struct);
-		for(int i=0; i<_wordToState.length; i++) {
-			_forward[i].divideCountsBy(_forwardStateMarginal);	
+		for(int i=0; i<_forward.length; i++) {
+			_forward[i].divideCountsBy(_forwardStateMarginal);
 		}
 		System.out.println("\tdiscounts forward: " + Arrays.toString(_forwardDelta) + 
 				"\tbackward " + Arrays.toString(_backwardDelta) +
-						"\tword " + Arrays.toString(_wordDelta));
+						"\tword " + Arrays.toString(_wordDelta) + 
+						"\tdoc " + Arrays.toString(_docBagDelta));
     }
 
 	public static void train(String inputFile, String outputFile, String configFile) throws Exception {
@@ -209,31 +212,34 @@ public class SBTSequenceLDAModel extends SBTSequenceModel {
 			for(int i=0; i<words.size(); i++) {
 				_c._z[doc].set(i, -1);
 			}
+			SparseBackoffTree topicGivenDoc = new SparseBackoffTree(_struct);
 			for(int i=0; i<words.size(); i++) {
 				int w = words.get(i);
 				double p = 0.0;						
 				
 				if(_c._pWord[w]>0.0) {
-					//init topicGivenDoc with all samples:
-					SparseBackoffTree topicGivenDoc = new SparseBackoffTree(_struct);					
-					for(int k =0; k<_c._z[doc].size(); k++) {
-						int r = _c._z[doc].get(k);
-						if(r != -1)
-							topicGivenDoc.addAndSmoothIfZero(r, 1.0, this._docBagDelta);
-					}
+
 					//resample everything before:
 					for(int k=0; k<i; k++) {
 						int r = sampleZ(doc, k, true, topicGivenDoc);
 						_c._z[doc].set(k, r);
 					}
-
+					//init topicGivenDoc with new samples:
+					topicGivenDoc = new SparseBackoffTree(_struct);					
+					for(int k =0; k<_c._z[doc].size(); k++) {
+						int r = _c._z[doc].get(k);
+						if(r != -1)
+							topicGivenDoc.addAndSmoothIfZero(r, 1.0, this._docBagDelta);
+					}
 					//test on this word:
 					double [] pWordGivenState = new double[wordTopicMarginal.length];
 					double [] pStateGivenPrev = new double[wordTopicMarginal.length];
+					double [] pStateGivenDoc = new double[wordTopicMarginal.length];
 					double checkSum = 0.0f;
 					int prev = 0;
 					if(i > 0)
 						prev = _c._z[doc].get(i-1);
+					double prodSum = 0.0;
 					for(int t=0;t<wordTopicMarginal.length; t++) {
 						//dividing by wordTopicMarginal ensures we use a distribution P(w | t) that sums to one
 						
@@ -246,12 +252,22 @@ public class SBTSequenceLDAModel extends SBTSequenceModel {
 						else {
 							pStateGivenPrev[t] = 1.0 / (double)pStateGivenPrev.length;
 						}
-						p += (pWordGivenState[t]*pStateGivenPrev[t]);
+						if(i > 0) {
+							pStateGivenDoc[t] = topicGivenDoc.getSmoothed(t) / topicGivenDoc._totalMass;
+						}
+						else {
+							pStateGivenDoc[t] = 1.0 / (double)pStateGivenDoc.length;
+						}
+						prodSum += pStateGivenPrev[t]*pStateGivenDoc[t];
+					}
+					for(int t=0;t<wordTopicMarginal.length; t++) {
+						p += (pWordGivenState[t]*pStateGivenPrev[t]*pStateGivenDoc[t]/prodSum);
 						if(Double.isNaN(p))
 							System.err.println("nan.");
 						if(p < 0.0)
-							System.err.println("negative.");
+							System.err.println("negative.");						
 					}
+
 					if(j==0 && (i==0 || (i== _c._docs[doc].size()-1)) && (CHECKSUMTOONE)) {
 						float sDoc = 0.0f;
 						float sWord = 0.0f;
