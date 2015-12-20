@@ -131,23 +131,27 @@ public class SparseBackoffTree {
 	
 	//adds the given sbt's mass to this sbt
 	//assumes shared struct
-	public void add(SparseBackoffTree sbt) {
+	public void addWeighted(SparseBackoffTree sbt, double weight) {
 		if(sbt != null) {
-			this._totalMass += sbt._totalMass;
-			this._smooth += sbt._smooth;
-			this._delta += sbt._delta;
+			this._totalMass += weight*sbt._totalMass;
+			this._smooth += weight*sbt._smooth;
+			this._delta += weight*sbt._delta;
 			for(int i=0; i<this._childMass.length; i++) {
-				this._childMass[i] += sbt._childMass[i];
+				this._childMass[i] += weight*sbt._childMass[i];
 				if(sbt._children != null) {
-//					if(this._children == null)
-//						this._children= new SparseBackoffTree [sbt._children.length];
 					if(this._children[i] == null) {
 						this._children[i] = new SparseBackoffTree(this._struct._children[i]);
 					}
-					this._children[i].add(sbt._children[i]);
+					this._children[i].addWeighted(sbt._children[i], weight);
 				}
 			}
-		}
+		}		
+	}
+	
+	//adds the given sbt's mass to this sbt
+	//assumes shared struct
+	public void add(SparseBackoffTree sbt) {
+		addWeighted(sbt, 1.0);
 	}
 	
 	//selects the state at given mass pt
@@ -401,6 +405,23 @@ public class SparseBackoffTree {
 		double [] sac = sbt.getSmoothAndCount(3);
 		System.out.println("should be {0.46, 1.1} " + Arrays.toString(sac));
 	}
+
+	public static void testAddition() {
+		double [] ds = new double [] {0.24, 0.36, 0.3};
+		SparseBackoffTreeStructure struct = new SparseBackoffTreeStructure(new int [] {2, 2, 3}, ds);
+		SparseBackoffTree sbt = new SparseBackoffTree(struct);
+		sbt.smoothAndAddMass(0, 1.0, ds);
+		sbt.smoothAndAddMass(3, 2.0, ds);
+		sbt.smoothAndAddMass(4, 1.0, ds);
+		sbt.smoothAndAddMass(11, 1.0, ds);
+		SparseBackoffTree sbt2 = new SparseBackoffTree(struct);
+		sbt2.addWeighted(sbt, 1.0);
+		double [] sac = sbt2.getSmoothAndCount(3);
+		System.out.println("should be {0.46, 1.1} " + Arrays.toString(sac));
+		sbt2.addWeighted(sbt2, 0.5);
+		sac = sbt2.getSmoothAndCount(3);
+		System.out.println("should be {0.69, 1.65} " + Arrays.toString(sac));
+	}
 	
 	/**
 	 * @param args
@@ -420,5 +441,6 @@ public class SparseBackoffTree {
 		testSubtraction();
 		testDivision();
 		testGetSmoothAndCount();
+		testAddition();
 	}
 }

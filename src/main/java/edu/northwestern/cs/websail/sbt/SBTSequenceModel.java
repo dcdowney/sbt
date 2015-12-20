@@ -52,10 +52,43 @@ public class SBTSequenceModel implements Serializable {
     	
     	public void run() {
     		_res = testOnDocFullPpl(_doc, _wordTopicMarginal);
+    		//_res = testOnDocFullPplExact(_doc, _wordTopicMarginal);
     		System.out.println(_doc + "\t" + _res[0] + "\t" + _res[1]);
     	}
     }
 
+    public static class TestGetProbsDoer extends TestEnsembleExactDoer {
+    	double [][] _probs;
+    	
+    	public TestGetProbsDoer(int i, double [][] wordTopicMarginal, SBTSequenceModel [] models, double [][][] tm, double [] ws) {
+    		super(i, wordTopicMarginal, models, tm, ws);
+    	}
+    	
+    	@Override
+    	public void run() {
+    		_probs = getEnsembleProbsForDoc(_doc, _wordTopicMarginal, _sbtsm, _tm);
+    	}
+    }
+    
+    private class TestExactDoer implements Runnable {
+     	int _doc;
+    	double [] _wordTopicMarginal;
+    	double [] _res;
+    	double [][] _tm;
+    	
+    	public TestExactDoer(int i, double [] wordTopicMarginal, double [][] transModel) {
+    		_doc = i;
+    		_wordTopicMarginal = wordTopicMarginal;
+    		_tm = transModel;
+    	}
+    	
+    	public void run() {
+    		//_res = testOnDocFullPpl(_doc, _wordTopicMarginal);
+    		_res = testOnDocFullPplExact(_doc, _wordTopicMarginal, _tm);
+    		System.out.println(_doc + "\t" + _res[0] + "\t" + _res[1]);
+    	} 	
+    }
+    
     public static class TestEnsembleDoer implements Runnable {
     	int _doc;
     	double [][] _wordTopicMarginal;
@@ -74,6 +107,29 @@ public class SBTSequenceModel implements Serializable {
     	}
     }
 	
+    public static class TestEnsembleExactDoer implements Runnable {
+    	int _doc;
+    	double [][] _wordTopicMarginal;
+    	double [][][] _tm;
+    	SBTSequenceModel [] _sbtsm;
+    	double [] _res;
+    	double [] _ws;
+    	
+    	public TestEnsembleExactDoer(int i, double [][] wordTopicMarginal, SBTSequenceModel [] models, double [][][] tm,
+    			double [] ws) {
+    		_doc = i;
+    		_wordTopicMarginal = wordTopicMarginal;
+    		_sbtsm = models;
+    		_tm = tm;
+    		_ws = ws;
+    	}
+    	
+    	public void run() {
+    		_res = testEnsembleOnDocExact(_doc, _wordTopicMarginal, _sbtsm, _tm, _ws);
+    		System.out.println(_doc + "\t" + _res[0] + "\t" + _res[1]);
+    	}
+    }
+    
 	//Model information:
     //state index zero is special start-of-sentence state
 	int [] _branchingFactors;
@@ -236,7 +292,7 @@ public class SBTSequenceModel implements Serializable {
 	public void set_OPTIMIZEINTERVAL(int _OPTIMIZEINTERVAL) {
 		this._OPTIMIZEINTERVAL = _OPTIMIZEINTERVAL;
 	}
-
+	
 	private void setThreadBreaks() {
 		_THREADBREAKS = new int[_NUMTHREADS];
 		long approxToks = _c._NUMTOKENS / _NUMTHREADS;
@@ -300,6 +356,70 @@ public class SBTSequenceModel implements Serializable {
 		brIn.close();
 	}
 
+	private double [][] transModel() {
+		int numStates = this._wordStateMarginal.length;
+		double [][] out = new double[numStates][numStates];
+		double diff = 0.0;
+		double total = 0.0;
+		double [] nextStateMarginal = new double[numStates];
+		double [] invBackwardMarginal = new double[numStates];
+		for(int i=0; i<invBackwardMarginal.length; i++) {
+			invBackwardMarginal[i] = 1.0 / _backwardStateMarginal[i];
+		}
+		for(int i=0; i<_backward.length; i++) {
+			_backward[i].divideCountsBy(invBackwardMarginal);
+		}
+		//first compute estimates based on forward only:
+		for(int i=0; i<numStates; i++) {
+			for(int j=0; j<numStates;j++) {
+				double forwardEst = 0.0;
+				double countMass = _forward[i].getSmoothed(j); 
+				if(_forward[i]._totalMass > 0.0)
+					forwardEst = countMass /_forward[i]._totalMass;
+				else
+					forwardEst = 1.0/(double)numStates;
+				out[i][j] = forwardEst;
+				nextStateMarginal[j] += countMass;
+				total += countMass;
+			}
+		}
+		total /= (double)numStates;
+		for(int i=0; i<numStates; i++) {
+			nextStateMarginal[i] /= total;
+		}
+		
+		double [][] be = new double [numStates][numStates];
+		for(int i=0; i<numStates; i++) {
+			double jSum = 0.0;
+			for(int j=0; j<numStates;j++) {
+				double backwardEst = 0.0;
+				if(_backward[j]._totalMass > 0.0)
+					//backwardEst = nextStateMarginal[j] * _backward[j].getSmoothed(i) / _backward[j]._totalMass;
+					backwardEst = _backward[j].getSmoothed(i);
+				else
+					backwardEst = _backwardStateMarginal[i] / (double)numStates; //not sure about this
+				be[i][j] = backwardEst;
+				jSum += backwardEst;
+			}
+			for(int j=0; j<numStates;j++) {
+				be[i][j] /= jSum;
+			}
+		}
+		total = 0.0;
+		for(int i=0; i<numStates; i++) {
+			for(int j=0; j<numStates;j++) {
+				double forwardEst = out[i][j];
+				double backwardEst = be[i][j];
+				diff += Math.abs(forwardEst - backwardEst);
+				out[i][j] = (forwardEst + backwardEst)/2.0;
+				total += out[i][j];
+			}
+		}
+		System.out.println("trans model diff: " + diff);
+		System.out.println("trans model total: " + total);
+		return out;
+	}
+	
 
 	protected TIntDoubleHashMap aggregateCounts(TIntArrayList occurs) {
 		TIntDoubleHashMap out = new TIntDoubleHashMap();
@@ -401,7 +521,9 @@ public class SBTSequenceModel implements Serializable {
 			sbti = new SparseBackoffTreeIntersection(sbts, curZ, subs, true);
 		else
 			sbti = new SparseBackoffTreeIntersection(sbts, true);
-		int sample = sbti.sample(_r);
+		int sample = 0;
+		//while(sample==0) //zero reserved for out-of-sentence.
+			sample = sbti.sample(_r);
 		return sample;
 	}
 	
@@ -430,7 +552,7 @@ public class SBTSequenceModel implements Serializable {
 		for(int i=0; i<ds.length; i++) {
 			zs[i] = new TIntArrayList(ds[i].size());
 			for(int j=0; j<ds[i].size(); j++)
-				zs[i].add(random ? _r.nextInt(maxVal) : 0);
+				zs[i].add(random ? _r.nextInt(maxVal-1)+1 : 0); //don't use zero, reserved for start/end
 		}
 	}
 
@@ -449,8 +571,10 @@ public class SBTSequenceModel implements Serializable {
 		else
 			hm = new TIntDoubleHashMap[_struct.numLeaves()];
 		
+		//forward steps from word j-1 to j
+		//backward steps from j to j-1
 		for(int i=0; i<zs.length; i++) {
-			for(int j=0; j<zs[i].size(); j++) {
+			for(int j=0; j<zs[i].size()+1; j++) {
 				int xID = -1;
 				if(from == -1) {
 					if(j==0) {
@@ -461,17 +585,32 @@ public class SBTSequenceModel implements Serializable {
 					}					
 				}
 				else if(from == 1) {
-					if(j== zs[i].size()-1) {
+					if(j== zs[i].size()) {
 						xID = 0;
 					}
 					else {
-						xID = zs[i].get(j+1);
+						xID = zs[i].get(j);
 					}
+				}
+				else if(from ==0 && j==zs[i].size()) { //no word here
+					continue;
 				}
 				else {
 					xID = ws[i].get(j);
 				}
-				int z = zs[i].get(j);
+				int z= -1;
+				if(from==-1&&j==zs[i].size()) {
+					 z = 0;
+				}
+				else if(from==1&&j==0) {
+					z = 0;
+				}
+				else {
+					if(from==1)
+						z = zs[i].get(j-1);
+					else
+						z = zs[i].get(j);
+				}
 				if(hm[xID] == null)
 					hm[xID] = new TIntDoubleHashMap();
 				hm[xID].adjustOrPutValue(z, 1.0, 1.0);
@@ -846,6 +985,11 @@ public class SBTSequenceModel implements Serializable {
     			totalparams += i.size();
     	}
     	hm = aggregateCounts(-1, zs, _c._docs);
+    	long transParams = 0L;
+    	for(TIntDoubleHashMap i : hm) {
+    		if(i != null)
+    			transParams += i.size();
+    	}
     	System.out.println("forward:");
     	step = STEPSIZE;
     	for(int i=0; i<NUMSTEPS; i++) {
@@ -859,10 +1003,11 @@ public class SBTSequenceModel implements Serializable {
         	gradientStep(_backwardDelta, hm, step, true);
         	step *= STEPDEC;
     	}
-    	System.out.println("full word params: " + Arrays.toString(_wordDelta));
-    	System.out.println("full forward params: " + Arrays.toString(_forwardDelta));
-    	System.out.println("full backward params: " + Arrays.toString(_backwardDelta));
+    	System.out.println("full word deltas: " + Arrays.toString(_wordDelta));
+    	System.out.println("full forward deltas: " + Arrays.toString(_forwardDelta));
+    	System.out.println("full backward deltas: " + Arrays.toString(_backwardDelta));
     	System.out.println("total nonzero word-state params: " + totalparams);
+    	System.out.println("total forward trans params: " + transParams);
     }
     
     /**
@@ -921,7 +1066,7 @@ public class SBTSequenceModel implements Serializable {
 			}
 			else 
 				done = true;
-		}		
+		}
 	}
 	
 	public void writeModel(String outFile) throws Exception {
@@ -949,6 +1094,79 @@ public class SBTSequenceModel implements Serializable {
 		out._struct = new SparseBackoffTreeStructure(out._branchingFactors);
 		out.updateModel(out._c._z);
 		return out;
+	}
+	
+	
+	
+	//returns model x word array of probabilities 
+	public static double [][] getEnsembleProbsForDoc(int doc, double [][] wordTopicMarginal, SBTSequenceModel [] ms,
+			double [][][] tms) {
+		
+		double [][] ps = new double[ms.length][ms[0]._c._docs[doc].size()]; //dims [model][token]
+		for(int m=0; m<ms.length; m++) {
+			int numStates = wordTopicMarginal[m].length;
+			SBTSequenceModel mod = ms[m];
+			TIntArrayList words = mod._c._docs[doc];
+			double [][] dist = new double[words.size()+1][numStates];
+			double [][] tm = tms[m];
+			
+			dist[0][0] = 1.0;
+			for(int i=0; i<dist.length - 1; i++) {
+				int w = words.get(i);
+				//step from i to i+1:
+				double [] pWordGivenState = new double[numStates];
+				double [] pStateGivenPrev = new double[numStates];
+//				for(int j=0; j<dist[i].length;j++) {
+//					sbtForward.addWeighted(this._forward[j], dist[i][j]);
+//				}
+				//intersect:
+				double p = 0.0;
+				for(int j=0; j<numStates;j++) {
+					for(int k=0; k<numStates;k++) {
+						pStateGivenPrev[k] += tm[j][k]*dist[i][j];
+					}
+				}
+				for(int t=0;t<numStates; t++) {
+					//dividing by wordTopicMarginal ensures we use a distribution P(w | t) that sums to one
+					pWordGivenState[t] = mod._wordToState[w].getSmoothed(t) / wordTopicMarginal[m][t];
+					//double numt = sbtForward.getSmoothed(t);
+					//pStateGivenPrev[t] = numt / sbtForward._totalMass;
+					dist[i+1][t] = (pWordGivenState[t]*pStateGivenPrev[t]);
+					p += dist[i+1][t];
+				}
+				ps[m][i] = p;
+				//renormalize:
+				for(int t=0;t<numStates;t++) {
+					dist[i+1][t] /= p;
+				}
+			}
+		}
+		return ps;
+	}
+	
+	public static double [] testEnsembleOnDocExact(int doc, double [][] wordTopicMarginal, SBTSequenceModel [] ms,
+			double [][][] tms, double [] ws) {
+		double LL = 0.0;
+				
+		double [][] ps = getEnsembleProbsForDoc(doc, wordTopicMarginal, ms, tms);
+		double numWords = 0.0;
+		double [] ensembleps = new double[ms[0]._c._docs[doc].size()];
+		for(int m=0; m < ms.length; m++) {
+			for(int i=0; i<ms[m]._c._docs[doc].size(); i++) {
+				ensembleps[i] += ws[m]*ps[m][i];
+			}
+		}
+		
+		for(int i=0; i<ms[0]._c._docs[doc].size(); i++) {
+			int w = ms[0]._c._docs[doc].get(i);
+			if(ms[0]._c._pWord[w] > 0) {
+				numWords++;
+				LL += Math.log(ensembleps[i]);
+				if(Double.isNaN(LL))
+					System.out.println("got NaN with " + ensembleps[i]);
+			}
+		}
+		return new double [] {LL, numWords};		
 	}
 	
 	public static double [] testEnsembleOnDocFullPpl(int doc, double [][] wordTopicMarginal, SBTSequenceModel [] ms) {
@@ -1020,6 +1238,57 @@ public class SBTSequenceModel implements Serializable {
 			}
 		}
 		return new double [] {LL, numWords};		
+	}
+	
+	//currently requires all test words found in vocab
+	public double [] testOnDocFullPplExact(int doc, double [] wordTopicMarginal, double [][] tm) {
+		double LL = 0.0;
+		double [] ps = new double[_c._docs[doc].size()];
+		
+		TIntArrayList words = _c._docs[doc];
+		int numStates = wordTopicMarginal.length;
+		double [][] dist = new double[words.size()+1][numStates];
+		
+		
+		dist[0][0] = 1.0;
+		for(int i=0; i<dist.length - 1; i++) {
+			int w = words.get(i);
+			//step from i to i+1:
+			SparseBackoffTree sbtForward = new SparseBackoffTree(_struct);
+			double [] pWordGivenState = new double[numStates];
+			double [] pStateGivenPrev = new double[numStates];
+//			for(int j=0; j<dist[i].length;j++) {
+//				sbtForward.addWeighted(this._forward[j], dist[i][j]);
+//			}
+			//intersect:
+			double p = 0.0;
+			for(int j=0; j<numStates;j++) {
+				for(int k=0; k<numStates;k++) {
+					pStateGivenPrev[k] += tm[j][k]*dist[i][j];
+				}
+			}
+			for(int t=0;t<numStates; t++) {
+				//dividing by wordTopicMarginal ensures we use a distribution P(w | t) that sums to one
+				pWordGivenState[t] = _wordToState[w].getSmoothed(t) / wordTopicMarginal[t];
+				//double numt = sbtForward.getSmoothed(t);
+				//pStateGivenPrev[t] = numt / sbtForward._totalMass;
+				dist[i+1][t] = (pWordGivenState[t]*pStateGivenPrev[t]);
+				p += dist[i+1][t];
+			}
+			ps[i] = p;
+			//renormalize:
+			for(int t=0;t<numStates;t++) {
+				dist[i+1][t] /= p;
+			}
+		}
+		
+		for(int i=0; i<ps.length; i++) {
+			LL += Math.log(ps[i]);
+			if(Double.isNaN(LL)) {
+				System.out.println("got NaN with " + ps[i]);
+			}
+		}
+		return new double [] {LL, ps.length};
 	}
 	
 	//tests on a single document using left-to-right method
@@ -1109,11 +1378,96 @@ public class SBTSequenceModel implements Serializable {
 		sbtsm.writeModel(outputFile);
 	}
 
+	//ps has dims docs x models x tokens
+	public static double [] optimizeEnsembleWeights(double [][][] ps) {
+		double [] ws = new double[ps[0].length];
+		Arrays.fill(ws, 1.0/(double)ws.length);
+		double STEPSIZE = 0.0000001;
+		for(int iter = 0; iter<10000; iter++) {
+			double [] grad = new double[ws.length];
+			double LL = 0.0;
+			double [] wordGrad = new double[ws.length];
+			for(int i=0; i<ps.length; i++) {
+				//TODO: fix this non-sequential array traverse
+				for(int j=0; j<ps[i][0].length; j++) {
+					double denom = 0.0;
+					for(int m=0; m<ps[i].length; m++) {
+						wordGrad[m] = ps[i][m][j];
+						denom += ps[i][m][j]*ws[m];
+					}
+					for(int m=0; m<ps[i].length; m++) {
+						grad[m] += wordGrad[m]/denom;
+					}
+					LL += Math.log(denom);
+				}
+			}
+			//HACK: make gradient sum to zero:
+			double gradSum = 0.0;
+			for(int m=0; m<grad.length; m++) {
+				gradSum += grad[m];
+			}
+			for(int m=0; m<grad.length; m++) {
+				grad[m] -= gradSum / (double)grad.length;
+			}
+			double normalizer = 0.0;
+			for(int i=0; i<ws.length;i++) {
+				ws[i] += STEPSIZE*grad[i];
+				normalizer += ws[i]; //not actually necessary if gradient sums to zero
+			}
+			for(int i=0; i<ws.length;i++) {
+				ws[i] /= normalizer;
+			}
+			if(iter % 100 == 0) {
+				System.out.println(iter + " LL is : " + LL + " Grad is " + Arrays.toString(grad));
+				System.out.println("new weights: " + Arrays.toString(ws));
+			}
+		}
+		return ws;
+	}
+	
+	public static double [] trainEnsemble(SBTSequenceModel [] sbtsm, double [][] wordStateNormalizer, double [][][] tm, String validationFile, int numDocs) throws Exception {
+		for(int i=0; i<sbtsm.length; i++) {
+			sbtsm[i]._c.reInitForCorpus(validationFile, numDocs);
+		}
+		double LL = 0.0;
+		double numWords = 0.0;
+		TestGetProbsDoer [] tds = new TestGetProbsDoer[numDocs];
+		ExecutorService e = Executors.newFixedThreadPool(sbtsm[0]._NUMTHREADS);
+		double [] eqW = new double[sbtsm.length];
+		Arrays.fill(eqW,  1.0/(double)eqW.length);
+		//ExecutorService e = Executors.newFixedThreadPool(1);
+		for(int i=0; i<tds.length;i++) {
+			if(sbtsm[0]._MAXTESTDOCSIZE < 0 || sbtsm[0]._c._docs[i].size() > sbtsm[0]._MAXTESTDOCSIZE) {
+				System.out.println("skipping " + i + " size " + sbtsm[0]._c._docs[i].size());
+				continue;
+			}
+			tds[i] = new TestGetProbsDoer(i, wordStateNormalizer, sbtsm, tm, eqW);
+			e.execute(tds[i]);
+		}
+		e.shutdown();
+		boolean terminated = false;
+		while(!terminated) {
+    		try {
+    			terminated = e.awaitTermination(60,  TimeUnit.SECONDS);
+    		}
+    		catch (InterruptedException ie) {
+    			
+    		}
+		}
+		double [][][] ps = new double[numDocs][][];
+		for(int i=0; i<numDocs;i++) {
+			ps[i] = tds[i]._probs;
+		}
+		double [] outW = optimizeEnsembleWeights(ps);
+		return outW;		
+	}
+	
 	//computes log likelihood of model using left-to-right method
 	//returns {ppl, number of tested words}
 	//numDocs is number in test file
 	//maxDocs is number actually tested (starting from the beginning of the file)
-	public static double [] testEnsemble(File [] modelFile, String testFile, int numDocs, int maxDocs, String configFile) throws Exception {
+	public static double [] testEnsemble(File [] modelFile, String testFile, int numDocs, int maxDocs, String configFile,
+			String validationFile, int validationDocs) throws Exception {
 		SBTSequenceModel [] sbtsm = new SBTSequenceModel[modelFile.length];
 		for(int i=0; i< sbtsm.length; i++) {
 			sbtsm[i] = readModel(modelFile[i].getAbsolutePath());
@@ -1121,19 +1475,25 @@ public class SBTSequenceModel implements Serializable {
 		}
 		
 		double [][] wordStateNormalizer = new double[modelFile.length][];
+		double [][][] tm = new double[modelFile.length][][];
 		int [] numStates = new int[sbtsm.length];
 		for(int i=0; i< sbtsm.length; i++) {
 			wordStateNormalizer[i] = getCheckMarginal(sbtsm[i]._wordToState, sbtsm[i]._struct);
 			numStates[i] = wordStateNormalizer[i].length;
+			tm[i] = sbtsm[i].transModel();
 		}
 		
+		double [] ws = new double[sbtsm.length];
+		if(validationFile != null) {
+			ws = trainEnsemble(sbtsm, wordStateNormalizer, tm, validationFile, validationDocs);
+		}
 		
 		for(int i=0; i<sbtsm.length; i++) {
 			sbtsm[i]._c.reInitForCorpus(testFile, numDocs);
 		}
 		double LL = 0.0;
 		double numWords = 0.0;
-		TestEnsembleDoer [] tds = new TestEnsembleDoer[maxDocs];
+		TestEnsembleExactDoer [] tds = new TestEnsembleExactDoer[maxDocs];
 		ExecutorService e = Executors.newFixedThreadPool(sbtsm[0]._NUMTHREADS);
 		//ExecutorService e = Executors.newFixedThreadPool(1);
 		for(int i=0; i<tds.length;i++) {
@@ -1141,7 +1501,7 @@ public class SBTSequenceModel implements Serializable {
 				System.out.println("skipping " + i + " size " + sbtsm[0]._c._docs[i].size());
 				continue;
 			}
-			tds[i] = new TestEnsembleDoer(i, wordStateNormalizer, sbtsm);
+			tds[i] = new TestEnsembleExactDoer(i, wordStateNormalizer, sbtsm, tm, ws);
 			e.execute(tds[i]);
 		}
 		e.shutdown();
@@ -1177,6 +1537,7 @@ public class SBTSequenceModel implements Serializable {
 		sbtsm.readConfigFile(configFile);
 		double [] wordStateNormalizer = getCheckMarginal(sbtsm._wordToState, sbtsm._struct); 
 		int numStates = wordStateNormalizer.length;
+		double [][] tm = sbtsm.transModel();
 
 		float [] pWordGivenState = new float[wordStateNormalizer.length] ; 
 		if(CHECKWORDDISTRIBUTION) {
@@ -1197,7 +1558,8 @@ public class SBTSequenceModel implements Serializable {
 		sbtsm.setThreadBreaks();
 		double LL = 0.0;
 		double numWords = 0.0;
-		TestDoer [] tds = new TestDoer[maxDocs];
+		//TestDoer [] tds = new TestDoer[maxDocs];
+		TestExactDoer [] tds = new TestExactDoer[maxDocs];
 		ExecutorService e = Executors.newFixedThreadPool(sbtsm._NUMTHREADS);
 		//ExecutorService e = Executors.newFixedThreadPool(1);
 		for(int i=0; i<tds.length;i++) {
@@ -1205,7 +1567,7 @@ public class SBTSequenceModel implements Serializable {
 				System.out.println("skipping " + i + " size " + sbtsm._c._docs[i].size());
 				continue;
 			}
-			tds[i] = sbtsm.new TestDoer(i, wordStateNormalizer);
+			tds[i] = sbtsm.new TestExactDoer(i, wordStateNormalizer, tm);
 			e.execute(tds[i]);
 		}
 		e.shutdown();
@@ -1259,6 +1621,29 @@ public class SBTSequenceModel implements Serializable {
 		bwOut.close();
 	}
 	
+	public void testAggregateCounts() {
+		TIntArrayList [] oneZs = new TIntArrayList[1];
+		oneZs[0] = new TIntArrayList();
+		oneZs[0].add(1);
+		oneZs[0].add(2);
+		oneZs[0].add(3);
+		oneZs[0].add(4);
+		oneZs[0].add(5);
+		TIntArrayList [] oneWs = new TIntArrayList[1];
+		oneWs[0] = new TIntArrayList();
+		oneWs[0].add(3);
+		oneWs[0].add(3);
+		oneWs[0].add(3);
+		oneWs[0].add(3);
+		oneWs[0].add(3);
+		TIntDoubleHashMap [] hm = aggregateCounts(-1, oneZs, oneWs);
+		System.out.println("hm is " + hm.length);
+		hm = aggregateCounts(1, oneZs, oneWs);
+		System.out.println("hm is " + hm.length);
+		hm = aggregateCounts(0, oneZs, oneWs);
+		System.out.println("hm is " + hm.length);
+	}
+	
 	public static void main(String[] args) throws Exception {
 		if(args.length > 0 && args[0].equalsIgnoreCase("train")) {
 			if(args.length != 4) {
@@ -1280,11 +1665,16 @@ public class SBTSequenceModel implements Serializable {
 			outputWordToTopicFile(args[1], args[2]);
 		}
 		else if(args.length > 0 && args[0].equalsIgnoreCase("testEns")) {
-			if(args.length != 6) {
-				System.err.println("Usage: test <model_dir> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>");
+			if(args.length != 6 && args.length != 8) {
+				System.err.println("Usage: test <model_dir> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>"
+						+ " [<validation_file> <num_validation_docs>]");
 			}
 			File f = new File(args[1]);
-			testEnsemble(f.listFiles(), args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3]);			
+			if(args.length==6)
+				testEnsemble(f.listFiles(), args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3], null, 0);
+			else
+				testEnsemble(f.listFiles(), args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3], args[6], 
+						Integer.parseInt(args[7]));
 		}
 		else {
 			System.err.println("Usage: <train|test|wordreps> <args...>");
