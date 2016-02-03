@@ -31,6 +31,7 @@ public class Corpus implements Serializable {
 		ArrayList<TIntArrayList> aldocs = new ArrayList<TIntArrayList>();
 		if (updatePWord)
 			_pWord = new double[_VOCABSIZE];
+		int ct = 0;
 		while((sLine = brIn.readLine())!=null) {
 			TIntArrayList ll = lineToList(sLine);
 			aldocs.add(ll);
@@ -41,9 +42,11 @@ public class Corpus implements Serializable {
 				}
 			}
 			toks += (long)ll.size();
+			ct++;
 		}
 		brIn.close();
 		System.out.println("Tokens: " + toks);
+		System.out.println("Lines processed: " + ct + " Lines saved: " + aldocs.size());
 		_NUMTOKENS = toks;
 		double dubToks = (double)toks;
 		if(updatePWord)
