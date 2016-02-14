@@ -211,7 +211,7 @@ return out;
   
 	public static void main(String[] args) throws Exception {
 	  //testWordEncoding();
-	  getEnsembleParams("e:\\data\\10m\\ens_1\\");
+	  getEnsembleParams("e:\\data\\10m\\ens_6\\");
 	  //testBerkSize("x:\\data\\10m\\trigramModelAll");
 	}
 
