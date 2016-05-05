@@ -1,5 +1,10 @@
 package edu.northwestern.cs.websail.sbt;
 
+import mpi.*;
+import java.util.Set;
+import com.javamex.classmexer.MemoryUtil;
+import com.javamex.classmexer.MemoryUtil.VisibilityFilter;
+
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.File;
@@ -26,7 +31,7 @@ import gnu.trove.map.hash.TIntDoubleHashMap;
 
 //TODO: factor out all the gross duplication between this class and SBTDocumentModel
 
-public class SBTSequenceModel implements Serializable {
+public class SBTSequenceModel_mpi implements Serializable {
 
 	private static final long serialVersionUID = 2L;
 
@@ -60,7 +65,7 @@ public class SBTSequenceModel implements Serializable {
     public static class TestGetProbsDoer extends TestEnsembleExactDoer {
     	double [][] _probs;
     	
-    	public TestGetProbsDoer(int i, double [][] wordTopicMarginal, SBTSequenceModel [] models, double [][][] tm, double [] ws) {
+    	public TestGetProbsDoer(int i, double [][] wordTopicMarginal, SBTSequenceModel_mpi [] models, double [][][] tm, double [] ws) {
     		super(i, wordTopicMarginal, models, tm, ws);
     	}
     	
@@ -92,10 +97,10 @@ public class SBTSequenceModel implements Serializable {
     public static class TestEnsembleDoer implements Runnable {
     	int _doc;
     	double [][] _wordTopicMarginal;
-    	SBTSequenceModel [] _sbtsm;
+    	SBTSequenceModel_mpi [] _sbtsm;
     	double [] _res;
     	
-    	public TestEnsembleDoer(int i, double [][] wordTopicMarginal, SBTSequenceModel [] models) {
+    	public TestEnsembleDoer(int i, double [][] wordTopicMarginal, SBTSequenceModel_mpi [] models) {
     		_doc = i;
     		_wordTopicMarginal = wordTopicMarginal;
     		_sbtsm = models;
@@ -111,12 +116,12 @@ public class SBTSequenceModel implements Serializable {
     	int _doc;
     	double [][] _wordTopicMarginal;
     	double [][][] _tm;
-    	SBTSequenceModel [] _sbtsm;
+    	SBTSequenceModel_mpi [] _sbtsm;
     	double [] _res;
     	double [] _ws;
     	double [] _ps;
     	
-    	public TestEnsembleExactDoer(int i, double [][] wordTopicMarginal, SBTSequenceModel [] models, double [][][] tm,
+    	public TestEnsembleExactDoer(int i, double [][] wordTopicMarginal, SBTSequenceModel_mpi [] models, double [][][] tm,
     			double [] ws) {
     		_doc = i;
     		_wordTopicMarginal = wordTopicMarginal;
@@ -147,20 +152,25 @@ public class SBTSequenceModel implements Serializable {
 	double [] _forwardDelta = null;
 	double [] _backwardDelta = null;
 	double [] _wordDelta = null;
+	double MaxTokenThreshold = 0.08;
 	
 	Corpus _c;
 	
 	double [][] baseProbs = null; //holds existing model probabilities when training a layer of an ensemble
 	
-	Random _r = new Random(4);
+	Random _r = new Random();
 	
 	//TODO: think about wrapping all of threading/train config up into a trainer class
 	
 	//threading:
 	private int _NUMTHREADS = -1;
 	private int[] _THREADBREAKS = null; //inclusive doc indices where threads *end* (initial thread starts
-							//at 0 implicitly)
+							//at start of processbreak implicitly)
+	private int[] _PROCESSBREAKS = null; //inclusive doc indices where mpi-process *end* (initial thread starts
+	//at 0 implicitly)
 	
+	private int _MPIRANK = -1;
+	private int _MPINUM = -1;
 	//training config:
 	protected int _NUMITERATIONS = -1;
 	protected int _OPTIMIZEINTERVAL = -1;
@@ -175,7 +185,7 @@ public class SBTSequenceModel implements Serializable {
 	
 	private int _numSkipWords = 0;
 	
-	public SBTSequenceModel(String configFile) throws Exception {
+	public SBTSequenceModel_mpi(String configFile) throws Exception {
 		_c = new Corpus();
 		readConfigFile(configFile);
 		if(_USEEXPANSION == 1) {
@@ -301,21 +311,182 @@ public class SBTSequenceModel implements Serializable {
 		this._OPTIMIZEINTERVAL = _OPTIMIZEINTERVAL;
 	}
 	
-	private void setThreadBreaks() {
-		_THREADBREAKS = new int[_NUMTHREADS];
+	private void setThreadBreaks(int from) throws MPIException{
 		
-		long approxToks = _c._NUMTOKENS / _NUMTHREADS;
-		long ct = 0;
-		int thread = 0;
-		for(int i=0; i<_c._NUMDOCS; i++ ) {
-			ct += _c._docs[i].size();
-			if(ct > approxToks) {
-				_THREADBREAKS[thread++] = i;
-				ct = 0;
+		if(from==0)
+		{
+			// random split
+			/*
+			TIntArrayList t;
+			_THREADBREAKS = new int[_NUMTHREADS];
+			for(int i=0;i<_c._NUMDOCS;i++)
+			{
+				int index = _r.nextInt(i + 1);
+				t = _c._docs[i];
+				_c._docs[i] = _c._docs[index];
+				_c._docs[index] = t;
 			}
+			long approxToks = _c._NUMTOKENS / _NUMTHREADS;
+			long ct = 0;
+			int thread = 0;
+			for(int i=0; i<_c._NUMDOCS; i++ ) {
+				ct += _c._docs[i].size();
+				if(ct > approxToks) {
+					_THREADBREAKS[thread++] = i;
+					ct = 0;
+				}
+			}
+			//extra goes in last thread:
+			_THREADBREAKS[_NUMTHREADS - 1] = _c._NUMDOCS - 1;
+			*/
+			
+			//Jaccard split
+			
+			
+			_THREADBREAKS = new int[_NUMTHREADS];
+			int assign[] = new int[_c._NUMDOCS];
+			
+			for(int i=0;i<_c._NUMDOCS;i++)
+				assign[i] = -1;
+			
+			int rank = MPI.COMM_WORLD.getRank();
+			int size = MPI.COMM_WORLD.getSize();
+	
+			PartitionCluster clusters[] = new PartitionCluster[size];
+			
+			for(int i=0;i<size;i++)
+				clusters[i] = new PartitionCluster(i);
+			
+			int tokenPerCluster = 0;
+			
+			for(int i=0;i<_c._NUMDOCS;i++)
+				tokenPerCluster += _c._docs[i].size();
+			tokenPerCluster /= size;
+			tokenPerCluster += 10;
+			
+			int MaxTokenLimit = (int) (tokenPerCluster * (1.0 + MaxTokenThreshold));
+			
+			for(int i=0;i<_c._NUMDOCS;i++)
+			{
+				// get sentence 
+				TIntArrayList sentence = _c._docs[i];
+				int clusterId = -1;
+				for(int j=0;j<size;j++)
+				{
+					double jaccardIndex = 0.0;
+					double tempJaccard = 0.0;	
+					int union = -1;
+					
+					if(clusters[j].token <= MaxTokenLimit)
+					{
+						//select a cluster to assign
+						Set<Integer> wordSet = clusters[j].wordSet;
+						union = 0;
+						TIntIterator it = sentence.iterator();
+						while(it.hasNext()) {
+							int num = it.next();
+							if(!wordSet.contains(num))
+								union ++;
+						}
+						int intersection =  sentence.size() - union;
+						tempJaccard = (double)intersection / union;
+						if( tempJaccard >= jaccardIndex ){
+							jaccardIndex = tempJaccard;
+							clusterId = j;
+						}
+					}
+				}
+				
+				clusters[clusterId].insert(sentence);
+				assign[i] = clusterId;
+			}
+			
+			_PROCESSBREAKS = new int[size];
+			
+			int p = 0;
+			for(int i=0;i<size;i++)
+			{
+				for(int j=0;j<_c._NUMDOCS;j++)
+				{
+					if(assign[j]==i)
+					{
+						TIntArrayList t;
+						t = _c._docs[j];
+						_c._docs[j] = _c._docs[p];
+						_c._docs[p] = t;
+						
+						int t_int;
+						
+						t_int = assign[j];
+						assign[j] = assign[p];
+						assign[p] = t_int;
+						
+						p++;
+					}
+				}
+				_PROCESSBREAKS[i] = p;
+			}
+			_PROCESSBREAKS[size - 1] = _c._NUMDOCS - 1;
+	
+			long approxToks = clusters[rank].token / _NUMTHREADS;
+			long ct = 0;
+			int thread = 0;
+			int start = -1;
+			int end = -1;
+			
+			if(rank==0)
+				start = 0;
+			else
+				start = _PROCESSBREAKS[rank-1] + 1;
+			
+			end = _PROCESSBREAKS[rank];
+			
+			for(int i=start; i<end; i++ ) {
+				ct += _c._docs[i].size();
+				if(ct > approxToks) {
+					_THREADBREAKS[thread++] = i;
+					ct = 0;
+				}
+			}
+			//extra goes in last thread:
+			_THREADBREAKS[_NUMTHREADS - 1] = _PROCESSBREAKS[rank];
+			
+	
+			
+			
+			/*
+			_THREADBREAKS = new int[_NUMTHREADS];
+			long approxToks = _c._NUMTOKENS / _NUMTHREADS;
+			long ct = 0;
+			int thread = 0;
+			for(int i=0; i<_c._NUMDOCS; i++ ) {
+				ct += _c._docs[i].size();
+				if(ct > approxToks) {
+					_THREADBREAKS[thread++] = i;
+					ct = 0;
+				}
+			}
+			//extra goes in last thread:
+			_THREADBREAKS[_NUMTHREADS - 1] = _c._NUMDOCS - 1;
+			*/
 		}
-		//extra goes in last thread:
-		_THREADBREAKS[_NUMTHREADS - 1] = _c._NUMDOCS - 1;
+		else
+		{
+			_THREADBREAKS = new int[_NUMTHREADS];
+			long approxToks = _c._NUMTOKENS / _NUMTHREADS;
+			long ct = 0;
+			int thread = 0;
+			for(int i=0; i<_c._NUMDOCS; i++ ) {
+				ct += _c._docs[i].size();
+				if(ct > approxToks) {
+					_THREADBREAKS[thread++] = i;
+					ct = 0;
+				}
+			}
+			//extra goes in last thread:
+			_THREADBREAKS[_NUMTHREADS - 1] = _c._NUMDOCS - 1;
+		}
+		
 		
 	}
 
@@ -334,10 +505,13 @@ public class SBTSequenceModel implements Serializable {
 				new InputStreamReader(new FileInputStream(inFile), "UTF8" ));
 		String sLine;
 		Method [] ms = this.getClass().getMethods();
+		int rank = MPI.COMM_WORLD.getRank();
+		
 		while((sLine = brIn.readLine())!=null) {
 			if(sLine.startsWith("#"))
 				continue;
-			System.out.println(sLine);
+			if(rank==0)
+				System.out.println(sLine);
 			String [] fields = sLine.split("\t");
 			//HACK; this only works given the get/set naming convention
 			Method m = null;
@@ -350,7 +524,8 @@ public class SBTSequenceModel implements Serializable {
 			Class<?> c = m.getParameterTypes()[0];
 			if(c.getName().equals("int")) {
 				int arg = Integer.parseInt(fields[1]);
-				System.out.println(m.getName() + "\t" + arg);
+				if(rank==0)
+					System.out.println(m.getName() + "\t" + arg);
 				m.invoke(this, arg);
 			}
 			else if(c.isArray() && c.getComponentType().getName().equals("int")) {
@@ -359,7 +534,8 @@ public class SBTSequenceModel implements Serializable {
 				for(int i=0; i<arg.length; i++) {
 					arg[i] = Integer.parseInt(vals[i]);
 				}
-				System.out.println(m.getName() + "\t" + Arrays.toString(arg));
+				if(rank==0)
+					System.out.println(m.getName() + "\t" + Arrays.toString(arg));
 				m.invoke(this, arg);
 			}
 		}
@@ -485,6 +661,7 @@ public class SBTSequenceModel implements Serializable {
 		TIntArrayList scratchZs = _c._scratchZ[docId];
 		TIntArrayList doc = _c._docs[docId];
 		//System.out.println("adding " + docCts.toString());
+
 		for(int i=0; i<doc.size(); i++) {
 			int newZ = sampleZ(docId, i, false);
 			if(newZ != zs.get(i))
@@ -521,9 +698,11 @@ public class SBTSequenceModel implements Serializable {
 				}
 			}
 		}
-		SparseBackoffTree sbtWord = this._wordToState[w]; 
+		SparseBackoffTree sbtWord = this._wordToState[w]; // ?? why null ?
 		boolean unseen = false;
 		//if unseen, using simple smoothing distribution for the purpose of sampling:
+		if(sbtWord==null)
+			System.out.println(" null word = " +w);
 		if(sbtWord._totalMass == 0.0) {
 			unseen = true;
 		}
@@ -626,7 +805,7 @@ public class SBTSequenceModel implements Serializable {
 	 * @param from  See above
 	 * @return
 	 */
-	public TIntDoubleHashMap [] aggregateCounts(int from, TIntArrayList [] zs, TIntArrayList [] ws) {
+	public TIntDoubleHashMap [] aggregateCounts(int from, TIntArrayList [] zs, TIntArrayList [] ws) throws MPIException{
 		TIntDoubleHashMap [] hm;
 		
 		//handle start/end as special case
@@ -666,7 +845,16 @@ public class SBTSequenceModel implements Serializable {
 					xID = zs[i].get(j+1);
 					z = zs[i].get(j);
 				}
-				else {
+				else if(from==0){// modified structure !!!! zheng
+					if(!within_doc_range(i))
+					{
+						continue;
+					}
+					xID = ws[i].get(j);
+					z = zs[i].get(j);
+				}
+				else
+				{
 					xID = ws[i].get(j);
 					z = zs[i].get(j);
 				}
@@ -676,6 +864,24 @@ public class SBTSequenceModel implements Serializable {
 			}
 		}
 		return hm;
+	}
+	
+	private boolean within_doc_range(int a) throws MPIException {
+		int rank=MPI.COMM_WORLD.getRank();
+		int size=MPI.COMM_WORLD.getSize();
+		int start = -1;
+		int end = -1;
+		if(rank==0)
+			start = 0;
+		else
+			start = this._PROCESSBREAKS[rank-1]+1;
+		
+		end = this._PROCESSBREAKS[rank];
+		
+		if(start<=a&&end>=a)
+			return true;
+		else
+			return false;
 	}
 	
 	/**
@@ -690,13 +896,17 @@ public class SBTSequenceModel implements Serializable {
 	 * @return
 	 */
 	public SparseBackoffTree [] getParamsFromZs(double [] dsWords, int from, TIntArrayList [] zs,
-			TIntArrayList [] ws) {
+			TIntArrayList [] ws) throws MPIException{
 		//aggregate:
 		TIntDoubleHashMap [] hm = aggregateCounts(from, zs, ws);
 		SparseBackoffTree [] out = new SparseBackoffTree[hm.length];
 		
 		for(int i=0; i<hm.length; i++) {
-			out[i] = new SparseBackoffTree(_struct);
+			
+			if(hm[i]==null && i!=0 && from==0)
+				out[i] = null;
+			else
+				out[i] = new SparseBackoffTree(_struct);
 		}
 		
 		//add:
@@ -723,16 +933,73 @@ public class SBTSequenceModel implements Serializable {
 	 */
 	public int initializeForCorpus(String inFile, int maxVal) throws Exception {
 		int toks = _c.readCorpusDat(inFile, true);
-		setThreadBreaks();
+		setThreadBreaks(0);
 		initZ(_c._docs, maxVal, true, false);
 		updateModel(_c._z);
 		return toks;
 	}
 	
-    private int gibbsPass() { 
+    private int gibbsPass() throws MPIException{ 
+    	
+    	
+    	
     	int changes= 0 ;
 	    GibbsDoer [] gds = new GibbsDoer[_NUMTHREADS];
 	    long stTime = System.currentTimeMillis();
+	    //MPI part
+		int rank = MPI.COMM_WORLD.getRank();
+		int size = MPI.COMM_WORLD.getSize();
+		for(int i=0; i<_NUMTHREADS;i++) {
+			gds[i] = new GibbsDoer();
+			if(rank==0)
+			{
+				if(i==0)
+					gds[i]._start = 0;
+				else
+					gds[i]._start = _THREADBREAKS[i-1] + 1;
+			}
+			else
+			{
+				if(i==0)
+					gds[i]._start = _PROCESSBREAKS[rank-1] + 1;
+				else
+					gds[i]._start = _THREADBREAKS[i-1] + 1;
+			}
+			gds[i]._end = _THREADBREAKS[i];
+		}
+		
+		ExecutorService e = Executors.newFixedThreadPool(_NUMTHREADS);
+		for(int i=0;i<_NUMTHREADS;i++)
+		{
+			e.execute(gds[i]);
+		}
+		e.shutdown();
+		boolean terminated = false;
+		while(!terminated) {
+    		try {
+    			terminated = e.awaitTermination(60,  TimeUnit.SECONDS);
+    		}
+    		catch (InterruptedException ie) {
+    			
+    		}
+		}
+		
+		for(int i=0; i<_NUMTHREADS; i++) {
+			changes += gds[i]._changes;
+		}
+		
+		int g_changes[] = {0};
+		int t_changes[] = {0};
+		t_changes[0] = changes;
+		// reduce changes
+		MPI.COMM_WORLD.allReduce(t_changes, g_changes, 1, MPI.INT, MPI.SUM);
+		
+		changes = t_changes[0];
+		
+		
+	    
+	    //multi thread part
+	    /*
     		ExecutorService e = Executors.newFixedThreadPool(_NUMTHREADS);
     		for(int i=0; i<_NUMTHREADS;i++) {
     			gds[i] = new GibbsDoer();
@@ -752,11 +1019,17 @@ public class SBTSequenceModel implements Serializable {
 	    			
 	    		}
     		}
+    		
     		for(int i=0; i<_NUMTHREADS; i++) {
     			changes += gds[i]._changes;
     		}
+    		
+//    		System.out.println("total = " + changes);
+    	*/
+	    
     	stTime = System.currentTimeMillis() - stTime;
-    	System.out.println("\ttime: " + stTime + "\tchanges: " + changes + "\tskipWords: " + _numSkipWords);
+    	if(rank==0)
+    		System.out.println("\ttime: " + stTime + "\tchanges: " + changes + "\tskipWords: " + _numSkipWords);
     	_numSkipWords = 0;
     	//System.out.println(Arrays.toString(_topicMarginal));
     	return changes;
@@ -767,7 +1040,7 @@ public class SBTSequenceModel implements Serializable {
 	//returns array of amt_i
 	//such that if we divide leaf counts by amt_i, we get smoothing with marginal P(z)
     //(see paper)
-	public static double [] getNormalizers(SparseBackoffTree [] shds, SparseBackoffTreeStructure struct) {
+	public static double [] getNormalizers(SparseBackoffTree [] shds, SparseBackoffTreeStructure struct) throws MPIException{
 		int numStates = struct.numLeaves();
 		double [] count = new double[numStates];
 		double [] smoothing = new double[numStates];
@@ -785,6 +1058,17 @@ public class SBTSequenceModel implements Serializable {
 			sumCount += count[i];
 			sumSmoother += smoothing[i];
 		}
+		
+		double t_sumCount[] = {sumCount};
+		double t_sumSmoother[] = {sumSmoother};
+		
+		MPI.COMM_WORLD.allReduce(count, count.length, MPI.DOUBLE, MPI.SUM);
+		MPI.COMM_WORLD.allReduce(smoothing, smoothing.length, MPI.DOUBLE, MPI.SUM);
+		MPI.COMM_WORLD.allReduce(t_sumCount, 1, MPI.DOUBLE, MPI.SUM);
+		MPI.COMM_WORLD.allReduce(t_sumSmoother, 1, MPI.DOUBLE, MPI.SUM);
+		sumCount = t_sumCount[0];
+		sumSmoother = t_sumSmoother[0];
+		
 		double [] out = new double[numStates];
 		double target = Math.max(maxSmooth + 1.0f, (sumSmoother + sumCount)/numStates);
 		for(int i=0; i<out.length; i++) {
@@ -811,7 +1095,7 @@ public class SBTSequenceModel implements Serializable {
 	/**
 	 * Updates the model given the topic assignments (_z) and divides by marginal for next sampling pass
 	 */
-    public void updateModel(TIntArrayList [] zs) {
+    public void updateModel(TIntArrayList [] zs) throws MPIException{
     	System.out.println("arch: " + Arrays.toString(this._branchingFactors));
 		System.out.println("second doc samples: " + zs[1].toString());
 		this._startState = getParamsFromZs(_forwardDelta, -2, zs, _c._docs)[0];
@@ -819,6 +1103,7 @@ public class SBTSequenceModel implements Serializable {
 		this._backward = getParamsFromZs(_backwardDelta, 1, zs, _c._docs);
 		this._endState = getParamsFromZs(_backwardDelta, 2, zs, _c._docs)[0];
 		this._wordToState = getParamsFromZs(_wordDelta, 0, zs, _c._docs);
+		
 		SparseBackoffTree [] comb = Arrays.copyOf(_backward, _backward.length + 1);
 		comb[_backward.length] = _endState;
 		this._backwardStateMarginal = getNormalizers(comb, _struct);
@@ -828,11 +1113,16 @@ public class SBTSequenceModel implements Serializable {
 		}
 		this._endState.divideCountsBy(_backwardStateMarginal);
 		for(int i=0; i<_wordToState.length; i++) {
-			_wordToState[i].divideCountsBy(_wordStateMarginal);	
+			if(_wordToState[i]!=null)
+				_wordToState[i].divideCountsBy(_wordStateMarginal);	
 		}
-		System.out.println("\tdiscounts forward: " + Arrays.toString(_forwardDelta) + 
-				"\tbackward " + Arrays.toString(_backwardDelta) +
+		
+		int rank = MPI.COMM_WORLD.getRank();
+		if(rank==0){
+			System.out.println("\tdiscounts forward: " + Arrays.toString(_forwardDelta) + 
+					"\tbackward " + Arrays.toString(_backwardDelta) +
 						"\tword " + Arrays.toString(_wordDelta));
+		}
     }
     
     /**
@@ -1028,7 +1318,7 @@ public class SBTSequenceModel implements Serializable {
     /**
      * Optimizes parameters using gradient ascent in log likelihood
      */
-    public void optimizeParameters(TIntArrayList [] zs) {
+    public void optimizeParameters(TIntArrayList [] zs) throws MPIException{
 //    	for(int i=0; i<_wordsDelta.length; i++) {
 //    		_wordsDelta[i] *= 0.9;
 //    		_docsDelta[i] *= 0.9;
@@ -1090,7 +1380,7 @@ public class SBTSequenceModel implements Serializable {
      * @param expansionIndex	The desired index in _EXPANSIONSCHEDULE to expand to.
      * @return	whether the model was expanded
      */
-    public boolean expandModel(int expansionIndex) {
+    public boolean expandModel(int expansionIndex) throws MPIException{
     	if(expansionIndex < _EXPANSIONSCHEDULE.length) {
     		int curLeaves = _struct.numLeaves(); 
     		//get new structure
@@ -1123,19 +1413,63 @@ public class SBTSequenceModel implements Serializable {
 		boolean done = false;
 		int j=0;
 		int maxVal = _struct.numLeaves();
+		int rank = MPI.COMM_WORLD.getRank();
+		int size = MPI.COMM_WORLD.getSize();
+		int start = -1;
+		int end = -1;
 		while(!done) {
 			for(int i=1; i<=iterations; i++) {
-				System.out.print(i + ": ");
+				long stTime = System.currentTimeMillis();
 				initZ(_c._docs, maxVal, false, true); //init scratch array to zero
 				gibbsPass();
+				int ori_array[] = null;
+				int array_size[] = {-1};
+				MPI.COMM_WORLD.barrier();
+				for(int k=0;k<size;k++)
+				{
+					int root = k;
+					if(k==0)
+						start = 0;
+					else
+						start = _PROCESSBREAKS[k-1] + 1;
+					
+					end = _PROCESSBREAKS[k];
+					
+					for(int l=start;l<=end;l++)
+					{
+						if(rank==root)
+						{
+							ori_array = _c._scratchZ[l].toArray();
+							array_size[0] = ori_array.length;
+						}
+						MPI.COMM_WORLD.bcast(array_size, 1, MPI.INT, root);
+						if(rank!=root)
+						{
+							ori_array = new int[array_size[0]];
+						}
+						MPI.COMM_WORLD.bcast(ori_array, array_size[0], MPI.INT, root);
+						if(rank!=root)
+						{
+							TIntArrayList t = new TIntArrayList();
+							t.reset();
+							t.add(ori_array);
+							_c._scratchZ[l] = t;
+						}
+					}
+				}
+				
 				if((i % updateInterval)==0) { 
 					optimizeParameters(_c._scratchZ);
 				}
 				updateModel(_c._scratchZ);
 				_c._z = _c._scratchZ;
+				stTime = System.currentTimeMillis() - stTime;
+				MPI.COMM_WORLD.barrier();
 			}
 			if(this._USEEXPANSION == 1) {
-				writeModel(outFile + "." + j);
+				
+				if(rank==0)
+					writeModel(outFile + "." + j);
 				j++;
 				done = !expandModel(j);
 			}
@@ -1157,20 +1491,52 @@ public class SBTSequenceModel implements Serializable {
 		_backward = null;
 		_startState = null;
 		_endState = null;
-		ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(outFile));
-		oos.writeObject(this);
-		oos.close();
+		int rank = MPI.COMM_WORLD.getRank();
+		if(rank==0)
+		{
+			ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(outFile));
+			oos.writeObject(this);
+			oos.close();
+		}
 		_wordToState = sbtW;
 		_forward = sbtF;
 		_backward = sbtB;
 		_struct = struct;
 		_startState = sbtS;
 		_endState = sbtE;
+		
+		/*
+		int blank_count = 0;
+		for(int i=0;i<_wordToState.length;i++)
+		{
+			if(_wordToState[i]==null)
+				blank_count++;
+		}
+		
+		System.out.println("rank :" + rank + "  "+"word to state size = " + _wordToState.length + "blank count" + blank_count + "num of leaf = " + _wordToState[0]._struct.numLeaves());
+		System.out.println("rank :" + rank + "  "+"forward size = " + _forward.length+ "num of leaf = " + _forward[0]._struct.numLeaves());
+		System.out.println("rank :" + rank + "  "+"backward size = " + _backward.length + "num of leaf = " + _backward[0]._struct.numLeaves());
+		*/
+		/*
+		 * 
+		 * 	double [] _wordStateMarginal;
+	double [] _backwardStateMarginal;
+	
+	SparseBackoffTreeStructure _struct;
+	double [] _forwardDelta = null;
+	double [] _backwardDelta = null;
+	double [] _wordDelta = null;
+	
+	Corpus _c;
+	
+	double [][] baseProbs = null;
+		 */
+
 	}
 	
-	public static SBTSequenceModel readModel(String inFile) throws Exception {
+	public static SBTSequenceModel_mpi readModel(String inFile) throws Exception {
 		ObjectInputStream ois = new ObjectInputStream(new FileInputStream(inFile));
-		SBTSequenceModel out = (SBTSequenceModel) ois.readObject();
+		SBTSequenceModel_mpi out = (SBTSequenceModel_mpi) ois.readObject();
 		ois.close();
 		out._struct = new SparseBackoffTreeStructure(out._branchingFactors);
 		out.updateModel(out._c._z);
@@ -1180,13 +1546,13 @@ public class SBTSequenceModel implements Serializable {
 	
 	
 	//returns model x word array of probabilities 
-	public static double [][] getEnsembleProbsForDoc(int doc, double [][] wordTopicMarginal, SBTSequenceModel [] ms,
+	public static double [][] getEnsembleProbsForDoc(int doc, double [][] wordTopicMarginal, SBTSequenceModel_mpi [] ms,
 			double [][][] tms) {
 		
 		double [][] ps = new double[ms.length][ms[0]._c._docs[doc].size()]; //dims [model][token]
 		for(int m=0; m<ms.length; m++) {
 			int numStates = wordTopicMarginal[m].length;
-			SBTSequenceModel mod = ms[m];
+			SBTSequenceModel_mpi mod = ms[m];
 			TIntArrayList words = mod._c._docs[doc];
 			double [][] dist = new double[words.size()+1][numStates];
 			double [][] tm = tms[m];
@@ -1233,7 +1599,7 @@ public class SBTSequenceModel implements Serializable {
 	}
 	
 	//side effect, fills psOut with probs per tok
-	public static double [] testEnsembleOnDocExact(int doc, double [][] wordTopicMarginal, SBTSequenceModel [] ms,
+	public static double [] testEnsembleOnDocExact(int doc, double [][] wordTopicMarginal, SBTSequenceModel_mpi [] ms,
 			double [][][] tms, double [] ws, double [] psOut) {
 		double LL = 0.0;
 				
@@ -1260,7 +1626,7 @@ public class SBTSequenceModel implements Serializable {
 		return new double [] {LL, numWords};		
 	}
 	
-	public static double [] testEnsembleOnDocFullPpl(int doc, double [][] wordTopicMarginal, SBTSequenceModel [] ms) {
+	public static double [] testEnsembleOnDocFullPpl(int doc, double [][] wordTopicMarginal, SBTSequenceModel_mpi [] ms) {
 		double LL = 0.0;
 		double [][] ps = new double[ms.length][ms[0]._c._docs[doc].size()]; //dims [model][token]
 		for(int m=0; m<ms.length; m++) {
@@ -1470,13 +1836,15 @@ public class SBTSequenceModel implements Serializable {
 	}
 
 	public static void train(String inputFile, String outputFile, String configFile, String probsFile) throws Exception {
-		SBTSequenceModel sbtsm = new SBTSequenceModel(configFile);
+		SBTSequenceModel_mpi sbtsm = new SBTSequenceModel_mpi(configFile);
 		sbtsm.initializeForCorpus(inputFile, sbtsm._struct.numLeaves());
 		if(probsFile != null) {
 			sbtsm.baseProbs = sbtsm.readBaseProbs(probsFile);
 		}
 		sbtsm.trainModel(sbtsm._NUMITERATIONS, sbtsm._OPTIMIZEINTERVAL, outputFile);
-		sbtsm.writeModel(outputFile);
+		int rank = MPI.COMM_WORLD.getRank();
+		if(rank==0)
+			sbtsm.writeModel(outputFile);
 	}
 	
 	public static void train(String inputFile, String outputFile, String configFile) throws Exception {
@@ -1530,13 +1898,66 @@ public class SBTSequenceModel implements Serializable {
 		return ws;
 	}
 	
-	public static double [] trainEnsemble(SBTSequenceModel [] sbtsm, double [][] wordStateNormalizer, double [][][] tm, String validationFile, int numDocs) throws Exception {
+	public static double [] trainEnsemble(SBTSequenceModel_mpi [] sbtsm, double [][] wordStateNormalizer, double [][][] tm, String validationFile, int numDocs) throws Exception {
 	  System.out.println("train ens num docs: " + numDocs);
 		for(int i=0; i<sbtsm.length; i++) {
 			sbtsm[i]._c.reInitForCorpus(validationFile, numDocs);
 		}
 		double LL = 0.0;
 		double numWords = 0.0;
+		
+		
+		TestGetProbsDoer [] tds = new TestGetProbsDoer[numDocs];
+		ExecutorService e = Executors.newFixedThreadPool(1);
+		double [] eqW = new double[sbtsm.length];
+		Arrays.fill(eqW,  1.0/(double)eqW.length);
+		//ExecutorService e = Executors.newFixedThreadPool(1);
+		// mpi-incomplete here zheng
+		for(int i=0; i<tds.length;i++) {
+			if(sbtsm[0]._MAXTESTDOCSIZE < 0 || sbtsm[0]._c._docs[i].size() > sbtsm[0]._MAXTESTDOCSIZE) {
+				System.out.println("skipping " + i + " size " + sbtsm[0]._c._docs[i].size());
+				continue;
+			}
+			tds[i] = new TestGetProbsDoer(i, wordStateNormalizer, sbtsm, tm, eqW);
+		}
+		
+		int rank = MPI.COMM_WORLD.getRank();
+		int size = MPI.COMM_WORLD.getSize();
+		
+		for(int i=rank; i<tds.length;i+=size) {
+			if(sbtsm[0]._MAXTESTDOCSIZE < 0 || sbtsm[0]._c._docs[i].size() > sbtsm[0]._MAXTESTDOCSIZE) {
+				continue;
+			}
+			e.execute(tds[i]);
+		}
+		e.shutdown();
+		boolean terminated = false;
+		while(!terminated) {
+    		try {
+    			terminated = e.awaitTermination(60,  TimeUnit.SECONDS);
+    		}
+    		catch (InterruptedException ie) {
+    			
+    		}
+		}
+		double [][][] ps = new double[numDocs][][];
+		for(int i=rank; i<numDocs;i+=size) {
+			ps[i] = tds[i]._probs;
+		}
+		
+		int root;
+		for(int i=0;i<numDocs;i++)
+		{
+			for(int j=0;j<ps[i].length;j++)
+			{
+				root = i%size;
+				MPI.COMM_WORLD.bcast(ps[i][j], ps[i][j].length, MPI.DOUBLE, root);
+			}
+		}
+		
+		
+		//multi thread 
+		/*
 		TestGetProbsDoer [] tds = new TestGetProbsDoer[numDocs];
 		ExecutorService e = Executors.newFixedThreadPool(sbtsm[0]._NUMTHREADS);
 		double [] eqW = new double[sbtsm.length];
@@ -1564,6 +1985,8 @@ public class SBTSequenceModel implements Serializable {
 		for(int i=0; i<numDocs;i++) {
 			ps[i] = tds[i]._probs;
 		}
+		*/
+		
 		double [] outW = optimizeEnsembleWeights(ps);
 		return outW;		
 	}
@@ -1574,7 +1997,7 @@ public class SBTSequenceModel implements Serializable {
 	//maxDocs is number actually tested (starting from the beginning of the file)
 	public static double [] testEnsemble(File [] modelFile, String testFile, int numDocs, int maxDocs, String configFile,
 			String validationFile, int validationDocs, String probsOutfile) throws Exception {
-		SBTSequenceModel [] sbtsm = new SBTSequenceModel[modelFile.length];
+		SBTSequenceModel_mpi [] sbtsm = new SBTSequenceModel_mpi[modelFile.length];
 		for(int i=0; i< sbtsm.length; i++) {
 			sbtsm[i] = readModel(modelFile[i].getAbsolutePath());
 			sbtsm[i].readConfigFile(configFile);
@@ -1602,6 +2025,75 @@ public class SBTSequenceModel implements Serializable {
 		double LL = 0.0;
 		double numWords = 0.0;
 		TestEnsembleExactDoer [] tds = new TestEnsembleExactDoer[maxDocs];
+		
+		
+		ExecutorService e = Executors.newFixedThreadPool(1);
+		//ExecutorService e = Executors.newFixedThreadPool(1);
+		int rank = MPI.COMM_WORLD.getRank();
+		int size = MPI.COMM_WORLD.getSize();
+		
+		for(int i=rank; i<tds.length;i+=size) {
+			if(sbtsm[0]._MAXTESTDOCSIZE < 0 || sbtsm[0]._c._docs[i].size() > sbtsm[0]._MAXTESTDOCSIZE) {
+				System.out.println("skipping " + i + " size " + sbtsm[0]._c._docs[i].size());
+				continue;
+			}
+			tds[i] = new TestEnsembleExactDoer(i, wordStateNormalizer, sbtsm, tm, ws);
+		}
+		for(int i=rank; i<tds.length;i+=size) {
+			if(sbtsm[0]._MAXTESTDOCSIZE < 0 || sbtsm[0]._c._docs[i].size() > sbtsm[0]._MAXTESTDOCSIZE) {
+				continue;
+			}
+			e.execute(tds[i]);
+		}
+		e.shutdown();
+		boolean terminated = false;
+		while(!terminated) {
+    		try {
+    			terminated = e.awaitTermination(60,  TimeUnit.SECONDS);
+    		}
+    		catch (InterruptedException ie) {
+    			
+    		}
+		}
+		
+		double [][] psOut = new double[sbtsm[0]._c._docs.length][];
+		
+		double t_LL[] = {0};
+		double g_LL[] = {0};
+		double t_numWords[] = {0};
+		double g_numWords[] = {0};
+
+		for(int i=rank; i<tds.length; i+=size) {
+			if(tds[i]==null)
+				continue;
+			t_LL[0] += tds[i]._res[0];
+			t_numWords[0] += tds[i]._res[1];
+			psOut[i] = tds[i]._ps;
+		}
+		
+		MPI.COMM_WORLD.allReduce(t_LL, g_LL, 1, MPI.DOUBLE, MPI.SUM);
+		MPI.COMM_WORLD.allReduce(t_numWords, g_numWords, 1, MPI.DOUBLE, MPI.SUM);
+		
+		LL = g_LL[0];
+		numWords = g_numWords[0];
+		int root;
+		
+		for(int i=0;i<tds.length;i++)
+		{
+			root = i%size;
+			MPI.COMM_WORLD.bcast(psOut[i], psOut[i].length, MPI.DOUBLE, root);
+		}
+		
+		System.out.println("Test LL: " + LL);
+		System.out.println("Words: " + numWords);
+		System.out.println("ppl: " + Math.exp(-LL/numWords));
+		if(probsOutfile != null && rank==0) {
+			writeBaseProbs(probsOutfile, psOut);
+		}
+		
+		
+		//multi thread
+		/*
 		ExecutorService e = Executors.newFixedThreadPool(sbtsm[0]._NUMTHREADS);
 		//ExecutorService e = Executors.newFixedThreadPool(1);
 		for(int i=0; i<tds.length;i++) {
@@ -1636,6 +2128,8 @@ public class SBTSequenceModel implements Serializable {
 		if(probsOutfile != null) {
 			writeBaseProbs(probsOutfile, psOut);
 		}
+		
+		*/
 		return new double [] {LL, numWords};
 	}
 	
@@ -1646,7 +2140,7 @@ public class SBTSequenceModel implements Serializable {
 	public static double [] testModel(String modelFile, String testFile, int numDocs, int maxDocs, String configFile) throws Exception {
 		boolean CHECKWORDDISTRIBUTION = false;
 		
-		SBTSequenceModel sbtsm = readModel(modelFile);
+		SBTSequenceModel_mpi sbtsm = readModel(modelFile);
 		sbtsm.readConfigFile(configFile);
 		double [] wordStateNormalizer = getCheckMarginal(sbtsm._wordToState, sbtsm._struct); 
 		int numStates = wordStateNormalizer.length;
@@ -1668,11 +2162,65 @@ public class SBTSequenceModel implements Serializable {
 		}
 		
 		sbtsm._c.reInitForCorpus(testFile, numDocs);
-		sbtsm.setThreadBreaks();
+		sbtsm.setThreadBreaks(1);
 		double LL = 0.0;
 		double numWords = 0.0;
 		//TestDoer [] tds = new TestDoer[maxDocs];
 		TestExactDoer [] tds = new TestExactDoer[maxDocs];
+		
+		//mpi
+		
+		ExecutorService e = Executors.newFixedThreadPool(1);
+		//ExecutorService e = Executors.newFixedThreadPool(1);
+		for(int i=0; i<tds.length;i++) {
+			if(sbtsm._MAXTESTDOCSIZE < 0 || sbtsm._c._docs[i].size() > sbtsm._MAXTESTDOCSIZE) {
+				System.out.println("skipping " + i + " size " + sbtsm._c._docs[i].size());
+				continue;
+			}
+			tds[i] = sbtsm.new TestExactDoer(i, wordStateNormalizer, tm);
+		}
+		int rank = MPI.COMM_WORLD.getRank();
+		int size = MPI.COMM_WORLD.getSize();
+		
+		for(int i=rank; i<tds.length;i+=size) {
+			if(sbtsm._MAXTESTDOCSIZE < 0 || sbtsm._c._docs[i].size() > sbtsm._MAXTESTDOCSIZE) {
+				continue;
+			}
+			
+			e.execute(tds[i]);
+		}
+		e.shutdown();
+		boolean terminated = false;
+		while(!terminated) {
+    		try {
+    			terminated = e.awaitTermination(60,  TimeUnit.SECONDS);
+    		}
+    		catch (InterruptedException ie) {
+    			
+    		}
+		}
+		
+		double t_LL[] = {0};
+		double g_LL[] = {0};
+		double t_numWords[] = {0};
+		double g_numWords[] = {0};
+		
+		for(int i=rank; i<tds.length; i+=size) {
+			if(tds[i]==null)
+				continue;
+			t_LL[0] += tds[i]._res[0];
+			t_numWords[0] += tds[i]._res[1];
+		}
+		
+		MPI.COMM_WORLD.allReduce(t_LL, g_LL, 1, MPI.DOUBLE, MPI.SUM);
+		MPI.COMM_WORLD.allReduce(t_numWords, g_numWords, 1, MPI.DOUBLE, MPI.SUM);
+		
+		LL = g_LL[0];
+		numWords = g_numWords[0];
+		
+		
+		// multi thread
+		/*
 		ExecutorService e = Executors.newFixedThreadPool(sbtsm._NUMTHREADS);
 		//ExecutorService e = Executors.newFixedThreadPool(1);
 		for(int i=0; i<tds.length;i++) {
@@ -1699,6 +2247,8 @@ public class SBTSequenceModel implements Serializable {
 			LL += tds[i]._res[0];
 			numWords += tds[i]._res[1];
 		}
+		*/
+		
 		return new double [] {LL, numWords};
 	}
 	
@@ -1716,7 +2266,7 @@ public class SBTSequenceModel implements Serializable {
 	 */
 	public static void outputWordToTopicFile(String modelFile, String outputFile) throws Exception {
 		BufferedWriter bwOut = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(outputFile), "UTF8"));
-		SBTSequenceModel sbtsm = readModel(modelFile);
+		SBTSequenceModel_mpi sbtsm = readModel(modelFile);
 		for(int i=0; i<sbtsm._c._pWord.length; i++) {
 			if(sbtsm._c._pWord[i] > 0.0) {
 				bwOut.write(i + "\t");
@@ -1734,7 +2284,7 @@ public class SBTSequenceModel implements Serializable {
 		bwOut.close();
 	}
 	
-	public void testAggregateCounts() {
+	public void testAggregateCounts() throws MPIException{
 		TIntArrayList [] oneZs = new TIntArrayList[1];
 		oneZs[0] = new TIntArrayList();
 		oneZs[0].add(1);
@@ -1758,29 +2308,49 @@ public class SBTSequenceModel implements Serializable {
 	}
 	
 	public static void main(String[] args) throws Exception {
+		MPI.Init(args);
 		if(args.length > 0 && args[0].equalsIgnoreCase("train")) {
 			if(args.length != 4) {
-				System.err.println("Usage: train <input_file> <model_output_file> <configuration_file>");
+				int rank = MPI.COMM_WORLD.getRank();
+				if(rank==0)
+					System.err.println("Usage: train <input_file> <model_output_file> <configuration_file>");
+				MPI.Finalize();
 				return;
 			}
+			
 			train(args[1], args[2], args[3]);
 		}
 		else if(args.length > 0 && args[0].equalsIgnoreCase("trainAug")) { //augment existing probs
 			if(args.length != 5) {
 				System.err.println("Usage: train <input_file> <model_output_file> <configuration_file> <probs_file>");
+				MPI.Finalize();
 				return;
 			}
 			train(args[1], args[2], args[3], args[4]);
 		}
 		else if(args.length > 0 && args[0].equalsIgnoreCase("test")) {
+			int rank = MPI.COMM_WORLD.getRank();
+			int size = MPI.COMM_WORLD.getSize();
+			
 			if(args.length != 6) {
-				System.err.println("Usage: test <model_file> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>");
+				if(rank==0)
+					System.err.println("Usage: test <model_file> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>");
+				MPI.Finalize();
+				return;
 			}
+			
+			if(size>1){
+				System.err.println("test phase only supports 1 MPI process currently");
+				MPI.Finalize();
+			}
+			
 			test(args[1], args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3]);
 		}
 		else if(args.length > 0 && args[0].equalsIgnoreCase("wordreps")) {
 			if(args.length != 3) {
 				System.err.println("Usage: wordreps <model_file> <output_file>");
+				MPI.Finalize();
+				return;
 			}
 			outputWordToTopicFile(args[1], args[2]);
 		}
@@ -1788,6 +2358,8 @@ public class SBTSequenceModel implements Serializable {
 			if(args.length != 6 && args.length != 8) {
 				System.err.println("Usage: test <model_dir> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>"
 						+ " [<validation_file> <num_validation_docs>]");
+				MPI.Finalize();
+				return;
 			}
 			File f = new File(args[1]);
 			if(args.length==6)
@@ -1800,6 +2372,8 @@ public class SBTSequenceModel implements Serializable {
 			if(args.length != 7 && args.length != 9) {
 				System.err.println("Usage: test <model_dir> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>"
 						+ " <probs_out_file> [<validation_file> <num_validation_docs>]");
+				MPI.Finalize();
+				return;
 			}
 			File f = new File(args[1]);
 			if(args.length==7)
@@ -1810,7 +2384,11 @@ public class SBTSequenceModel implements Serializable {
 		}
 		else {
 			System.err.println("Usage: <train|trainAug|test|wordreps|testEns|outputEnsProbs> <args...>");
+			MPI.Finalize();
+			return;
 		}
+		
+		MPI.Finalize();
 	}
 
 	

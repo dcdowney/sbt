@@ -8,6 +8,7 @@ import java.util.ArrayList;
 
 import gnu.trove.iterator.TIntIterator;
 import gnu.trove.list.array.TIntArrayList;
+import mpi.MPI;
 
 public class Corpus implements Serializable {
 	
@@ -45,8 +46,11 @@ public class Corpus implements Serializable {
 			ct++;
 		}
 		brIn.close();
-		System.out.println("Tokens: " + toks);
-		System.out.println("Lines processed: " + ct + " Lines saved: " + aldocs.size());
+		int rank = MPI.COMM_WORLD.getRank();
+		if(rank==0){
+			System.out.println("Tokens: " + toks);
+			System.out.println("Lines processed: " + ct + " Lines saved: " + aldocs.size());
+		}
 		_NUMTOKENS = toks;
 		double dubToks = (double)toks;
 		if(updatePWord)

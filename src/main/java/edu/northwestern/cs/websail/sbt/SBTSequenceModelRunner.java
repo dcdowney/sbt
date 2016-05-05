@@ -1,9 +1,10 @@
 package edu.northwestern.cs.websail.sbt;
-
+import mpi.*;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+
 
 import edu.berkeley.nlp.lm.ArrayEncodedProbBackoffLm;
 import edu.berkeley.nlp.lm.ContextEncodedProbBackoffLm;
@@ -72,7 +73,7 @@ public class SBTSequenceModelRunner {
     }
     
     public int compareTo(IntDouble id) {
-      return Integer.compare(i,  id.i);
+    	return Integer.valueOf(i).compareTo(id.i);
     }
   }
   
