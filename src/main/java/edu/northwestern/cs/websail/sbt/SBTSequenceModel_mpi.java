@@ -777,8 +777,8 @@ public class SBTSequenceModel_mpi implements Serializable {
 		return chg;
     }	
 	
-
-	public void initZ(TIntArrayList [] ds, int maxVal, boolean random, boolean scratch) {
+    //Zheng added: incFile
+	public void initZ(TIntArrayList [] ds, int maxVal, boolean random, boolean scratch, String incFile) throws Exception {
 		TIntArrayList [] zs;
 		if(scratch) {
 			_c._scratchZ = new TIntArrayList[ds.length];
@@ -788,10 +788,16 @@ public class SBTSequenceModel_mpi implements Serializable {
 			_c._z = new TIntArrayList[ds.length];
 			zs = _c._z;
 		}
-		for(int i=0; i<ds.length; i++) {
-			zs[i] = new TIntArrayList(ds[i].size());
-			for(int j=0; j<ds[i].size(); j++)
-				zs[i].add(random ? _r.nextInt(maxVal) : 0); //don't use zero, reserved for start/end
+		if(incFile==null){
+			for(int i=0; i<ds.length; i++) {
+				zs[i] = new TIntArrayList(ds[i].size());
+				for(int j=0; j<ds[i].size(); j++)
+					zs[i].add(random ? _r.nextInt(maxVal) : 0); //don't use zero, reserved for start/end
+			}
+		}
+		else{
+			SBTSequenceModel_mpi t_sbtsm = readModel(incFile);
+			_c._z = t_sbtsm._c._z;
 		}
 	}
 
@@ -928,13 +934,15 @@ public class SBTSequenceModel_mpi implements Serializable {
 	 * reads the corpus and initializes zs and model
 	 * @param inFile
 	 * @param maxVal
+	 * @param incFile
 	 * @return
 	 * @throws Exception
 	 */
-	public int initializeForCorpus(String inFile, int maxVal) throws Exception {
+	//Zheng added: incFile: null, if init; not null if restart
+	public int initializeForCorpus(String inFile, int maxVal, String incFile) throws Exception {
 		int toks = _c.readCorpusDat(inFile, true);
 		setThreadBreaks(0);
-		initZ(_c._docs, maxVal, true, false);
+		initZ(_c._docs, maxVal, true, false, incFile);
 		updateModel(_c._z);
 		return toks;
 	}
@@ -1096,8 +1104,11 @@ public class SBTSequenceModel_mpi implements Serializable {
 	 * Updates the model given the topic assignments (_z) and divides by marginal for next sampling pass
 	 */
     public void updateModel(TIntArrayList [] zs) throws MPIException{
-    	System.out.println("arch: " + Arrays.toString(this._branchingFactors));
-		System.out.println("second doc samples: " + zs[1].toString());
+    	int rank = MPI.COMM_WORLD.getRank();
+    	if(rank==0){
+    		System.out.println("arch: " + Arrays.toString(this._branchingFactors));
+    		System.out.println("second doc samples: " + zs[1].toString());
+    	}
 		this._startState = getParamsFromZs(_forwardDelta, -2, zs, _c._docs)[0];
 		this._forward = getParamsFromZs(_forwardDelta, -1, zs, _c._docs);
 		this._backward = getParamsFromZs(_backwardDelta, 1, zs, _c._docs);
@@ -1117,7 +1128,7 @@ public class SBTSequenceModel_mpi implements Serializable {
 				_wordToState[i].divideCountsBy(_wordStateMarginal);	
 		}
 		
-		int rank = MPI.COMM_WORLD.getRank();
+		
 		if(rank==0){
 			System.out.println("\tdiscounts forward: " + Arrays.toString(_forwardDelta) + 
 					"\tbackward " + Arrays.toString(_backwardDelta) +
@@ -1388,7 +1399,9 @@ public class SBTSequenceModel_mpi implements Serializable {
     		_struct = new SparseBackoffTreeStructure(_branchingFactors);
     		initDeltas();
     		int multiplier = _struct.numLeaves()/curLeaves;
-    		System.out.println("Expanding to " + Arrays.toString(_branchingFactors));
+    		int rank = MPI.COMM_WORLD.getRank();
+    		if(rank==0)
+    			System.out.println("Expanding to " + Arrays.toString(_branchingFactors));
     		for(int i=0; i<_c._z.length;i++) {
     			for(int j=0; j<_c._z[i].size(); j++) {
     				int z = multiplier * _c._z[i].get(j) + _r.nextInt(multiplier);
@@ -1409,9 +1422,9 @@ public class SBTSequenceModel_mpi implements Serializable {
      * @param  updateInterval	number of iterations between hyperparameter updates
      * @param  outFile   writes model to here before each expansion
      */
-	public void trainModel(int iterations, int updateInterval, String outFile) throws Exception {
+	public void trainModel(int iterations, int updateInterval, String outFile, int start_j) throws Exception {
 		boolean done = false;
-		int j=0;
+		int j=start_j;
 		int maxVal = _struct.numLeaves();
 		int rank = MPI.COMM_WORLD.getRank();
 		int size = MPI.COMM_WORLD.getSize();
@@ -1420,7 +1433,7 @@ public class SBTSequenceModel_mpi implements Serializable {
 		while(!done) {
 			for(int i=1; i<=iterations; i++) {
 				long stTime = System.currentTimeMillis();
-				initZ(_c._docs, maxVal, false, true); //init scratch array to zero
+				initZ(_c._docs, maxVal, false, true, null); //init scratch array to zero
 				gibbsPass();
 				int ori_array[] = null;
 				int array_size[] = {-1};
@@ -1517,20 +1530,6 @@ public class SBTSequenceModel_mpi implements Serializable {
 		System.out.println("rank :" + rank + "  "+"forward size = " + _forward.length+ "num of leaf = " + _forward[0]._struct.numLeaves());
 		System.out.println("rank :" + rank + "  "+"backward size = " + _backward.length + "num of leaf = " + _backward[0]._struct.numLeaves());
 		*/
-		/*
-		 * 
-		 * 	double [] _wordStateMarginal;
-	double [] _backwardStateMarginal;
-	
-	SparseBackoffTreeStructure _struct;
-	double [] _forwardDelta = null;
-	double [] _backwardDelta = null;
-	double [] _wordDelta = null;
-	
-	Corpus _c;
-	
-	double [][] baseProbs = null;
-		 */
 
 	}
 	
@@ -1834,21 +1833,28 @@ public class SBTSequenceModel_mpi implements Serializable {
 		}
 		return new double [] {LL, numWords};
 	}
-
-	public static void train(String inputFile, String outputFile, String configFile, String probsFile) throws Exception {
+	//Zheng added: incFile paramter: null if init, not null if restart from previous Z
+	public static void train(String inputFile, String outputFile, String configFile, String probsFile, String incFile) throws Exception {
 		SBTSequenceModel_mpi sbtsm = new SBTSequenceModel_mpi(configFile);
-		sbtsm.initializeForCorpus(inputFile, sbtsm._struct.numLeaves());
+		sbtsm.initializeForCorpus(inputFile, sbtsm._struct.numLeaves(),incFile);
 		if(probsFile != null) {
 			sbtsm.baseProbs = sbtsm.readBaseProbs(probsFile);
 		}
-		sbtsm.trainModel(sbtsm._NUMITERATIONS, sbtsm._OPTIMIZEINTERVAL, outputFile);
+		if(incFile==null)
+			sbtsm.trainModel(sbtsm._NUMITERATIONS, sbtsm._OPTIMIZEINTERVAL, outputFile,0);
+		else
+		{
+			String[] aa = incFile.split("\\.");
+			int start_j = Integer.parseInt(aa[aa.length-1]);
+			sbtsm.trainModel(sbtsm._NUMITERATIONS, sbtsm._OPTIMIZEINTERVAL, outputFile,start_j+1);
+		}
 		int rank = MPI.COMM_WORLD.getRank();
 		if(rank==0)
 			sbtsm.writeModel(outputFile);
 	}
 	
 	public static void train(String inputFile, String outputFile, String configFile) throws Exception {
-		train(inputFile, outputFile, configFile, null);
+		train(inputFile, outputFile, configFile, null,null);
 	}
 
 	//ps has dims docs x models x tokens
@@ -2320,13 +2326,23 @@ public class SBTSequenceModel_mpi implements Serializable {
 			
 			train(args[1], args[2], args[3]);
 		}
+		else if(args.length > 0 && args[0].equalsIgnoreCase("trainInc")) { //restart from previous module
+			if(args.length != 5) {
+				int rank = MPI.COMM_WORLD.getRank();
+				if(rank==0)
+					System.err.println("Usage: trainInc <input_file> <model_output_file> <configuration_file> <restart_model_file>");
+				MPI.Finalize();
+				return;
+			}
+			train(args[1], args[2], args[3], null,args[4]);
+		}
 		else if(args.length > 0 && args[0].equalsIgnoreCase("trainAug")) { //augment existing probs
 			if(args.length != 5) {
 				System.err.println("Usage: train <input_file> <model_output_file> <configuration_file> <probs_file>");
 				MPI.Finalize();
 				return;
 			}
-			train(args[1], args[2], args[3], args[4]);
+			train(args[1], args[2], args[3], args[4],null);
 		}
 		else if(args.length > 0 && args[0].equalsIgnoreCase("test")) {
 			int rank = MPI.COMM_WORLD.getRank();
@@ -2340,8 +2356,10 @@ public class SBTSequenceModel_mpi implements Serializable {
 			}
 			
 			if(size>1){
-				System.err.println("test phase only supports 1 MPI process currently");
+				if(rank==0)
+					System.err.println("test phase only supports 1 MPI process currently");
 				MPI.Finalize();
+				return;
 			}
 			
 			test(args[1], args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3]);
