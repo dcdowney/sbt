@@ -2,6 +2,7 @@ package edu.northwestern.cs.websail.sbt;
 import gnu.trove.iterator.TIntDoubleIterator;
 import gnu.trove.map.hash.TIntDoubleHashMap;
 import gnu.trove.map.hash.TIntIntHashMap;
+import junit.framework.Assert;
 
 import java.util.Arrays;
 import java.util.Random;
@@ -362,6 +363,31 @@ public class SparseBackoffTree {
 		return _totalMass;
 	}
 	
+	public void addInto(double [] target, int startIdx, double toAdd) {
+	  if(_children==null) {
+	    for(int i=0; i<_childMass.length;i++)
+	      target[startIdx++] += toAdd + _childMass[i] + _smooth;
+	  }
+	  else {
+	    toAdd += _smooth;
+	    for(int i=0; i<_children.length; i++) {
+	      if(_children[i] != null)
+	        _children[i].addInto(target, startIdx, toAdd);
+	      else
+	        for(int j=startIdx;j<startIdx+_struct._numLeaves[i]; j++)
+	          target[j] += toAdd;
+	      startIdx += _struct._numLeaves[i];
+	    }
+	  }
+	}
+	
+	public double [] toDoubleArray() {
+	  double [] out = new double[_struct.numLeaves()];
+	  addInto(out, 0, 0.0);
+	  
+	  return out;
+	}
+	
 	public static void testDivision() {
 		double [] ds = new double [] {0.24, 0.36, 0.3};
 		SparseBackoffTreeStructure struct = new SparseBackoffTreeStructure(new int [] {2, 2, 3}, ds);
@@ -423,6 +449,23 @@ public class SparseBackoffTree {
 		System.out.println("should be {0.69, 1.65} " + Arrays.toString(sac));
 	}
 	
+	public static void testToDoubleArray() {
+	  double [] ds = new double [] {0.24, 0.36, 0.3};
+    SparseBackoffTreeStructure struct = new SparseBackoffTreeStructure(new int [] {2, 2, 3}, ds);
+    SparseBackoffTree sbt = new SparseBackoffTree(struct);
+    sbt.smoothAndAddMass(0, 1.0, ds);
+    sbt.smoothAndAddMass(3, 2.0, ds);
+    sbt.smoothAndAddMass(4, 1.0, ds);
+    sbt.smoothAndAddMass(11, 1.0, ds);
+    double [] byGet = new double[12];
+    for(int i=0; i<12; i++)
+      byGet[i] = sbt.getSmoothed(i);
+    double [] byTDA = sbt.toDoubleArray();
+    System.out.println("should be equal: ");
+    System.out.println(Arrays.toString(byGet));
+    System.out.println(Arrays.toString(byTDA));
+	}
+	
 	/**
 	 * @param args
 	 */
@@ -442,5 +485,6 @@ public class SparseBackoffTree {
 		testDivision();
 		testGetSmoothAndCount();
 		testAddition();
+		testToDoubleArray();
 	}
 }

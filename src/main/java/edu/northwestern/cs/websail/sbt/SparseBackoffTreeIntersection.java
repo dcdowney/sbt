@@ -298,6 +298,7 @@ public class SparseBackoffTreeIntersection {
 		return selectAt(ch, r, (_subs != null)?0:-1);
 	}
 	
+
 	public int selectAt(double ch, Random r, int subIdx) {
 		if(_sbts.length > 1) {
 			for(int i=0; i<this._siblingMass.length; i++) {

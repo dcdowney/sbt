@@ -5,8 +5,10 @@ import java.io.FileInputStream;
 import java.io.InputStreamReader;
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Arrays;
 
 import gnu.trove.iterator.TIntIterator;
+import gnu.trove.list.array.TDoubleArrayList;
 import gnu.trove.list.array.TIntArrayList;
 
 public class Corpus implements Serializable {
@@ -19,6 +21,8 @@ public class Corpus implements Serializable {
 	TIntArrayList [] _docs; //the words
 	TIntArrayList [] _z; //the topic variable assignments  //TODO: think about factoring out
 	TIntArrayList [] _scratchZ; //accumulator for new zs
+	TDoubleArrayList [] _changeFactor; //weighted average of how much change in prev iters
+	double lambda = 0.99; //decay for weighted average of how much change
 	double [] _pWord; //marginal word prob
 
 	//returns number of docs
@@ -55,6 +59,14 @@ public class Corpus implements Serializable {
 					_pWord[j] /= dubToks;
 		_NUMDOCS = aldocs.size();
 		_docs = aldocs.toArray(new TIntArrayList[aldocs.size()]);
+		_changeFactor = new TDoubleArrayList[_docs.length];
+		for(int j=0; j<_docs.length;j++) {
+		  _changeFactor[j] = new TDoubleArrayList(_docs[j].size());
+		  for(int k=0; k<_docs[j].size();k++) {
+		    _changeFactor[j].add(1.0);//start with maximal change
+		  }
+		    
+		}
 		return i;
 	}
 	

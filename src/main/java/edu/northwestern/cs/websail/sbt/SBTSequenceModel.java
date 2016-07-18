@@ -484,10 +484,19 @@ public class SBTSequenceModel implements Serializable {
 		TIntArrayList doc = _c._docs[docId];
 		//System.out.println("adding " + docCts.toString());
 		for(int i=0; i<doc.size(); i++) {
+		  double chg = _c._changeFactor[docId].get(i);
+		  if(_r.nextDouble() > chg) { //skip it
+		    scratchZs.set(i, zs.get(i));
+		    continue;		    
+		  }
 			int newZ = sampleZ(docId, i, false);
-			if(newZ != zs.get(i))
+			chg = _c.lambda * chg;
+			if(newZ != zs.get(i)) {
 				changes++;
+				chg = 1.0;
+			}
 			scratchZs.set(i, newZ);
+			_c._changeFactor[docId].set(i, chg);
 		}
 		return changes;
 	}
@@ -812,6 +821,8 @@ public class SBTSequenceModel implements Serializable {
     public void updateModel(TIntArrayList [] zs) {
     	System.out.println("arch: " + Arrays.toString(this._branchingFactors));
 		System.out.println("second doc samples: " + zs[1].toString());
+		if(_c._changeFactor != null)
+		  System.out.println("second doc chg: " + _c._changeFactor[1].toString());
 		this._startState = getParamsFromZs(_forwardDelta, -2, zs, _c._docs)[0];
 		this._forward = getParamsFromZs(_forwardDelta, -1, zs, _c._docs);
 		this._backward = getParamsFromZs(_backwardDelta, 1, zs, _c._docs);
@@ -1101,6 +1112,7 @@ public class SBTSequenceModel implements Serializable {
     			for(int j=0; j<_c._z[i].size(); j++) {
     				int z = multiplier * _c._z[i].get(j) + _r.nextInt(multiplier);
     				_c._z[i].set(j,  z);
+    				_c._changeFactor[i].set(j, 1.0);
     			}
     		}
     		updateModel(_c._z);
@@ -1110,6 +1122,10 @@ public class SBTSequenceModel implements Serializable {
     		return false;
     }
     
+    public void trainModel(int iterations, int updateInterval, String outFile) throws Exception {
+      trainModel(iterations, updateInterval, outFile, false);
+    }
+    
     /**
      * Trains the model for a specified number of iterations.
      *
@@ -1117,10 +1133,13 @@ public class SBTSequenceModel implements Serializable {
      * @param  updateInterval	number of iterations between hyperparameter updates
      * @param  outFile   writes model to here before each expansion
      */
-	public void trainModel(int iterations, int updateInterval, String outFile) throws Exception {
+	public void trainModel(int iterations, int updateInterval, String outFile, boolean expandOnEntry) throws Exception {
 		boolean done = false;
 		int j=0;
 		int maxVal = _struct.numLeaves();
+		if(expandOnEntry) {
+      done = !expandModel(j);
+		}
 		while(!done) {
 			for(int i=1; i<=iterations; i++) {
 				System.out.print(i + ": ");
@@ -1467,6 +1486,14 @@ public class SBTSequenceModel implements Serializable {
 		return new double [] {LL, numWords};
 	}
 
+	public static void extendTraining(String modelFile, String inputFile, String outputFile, String configFile) throws Exception {
+	  SBTSequenceModel sbtsm = readModel(modelFile);
+	  sbtsm.readConfigFile(configFile);
+	  sbtsm._expansionBranchFactors = sbtsm._branchingFactors;
+	  sbtsm.trainModel(sbtsm._NUMITERATIONS, sbtsm._OPTIMIZEINTERVAL, outputFile, true);
+	  sbtsm.writeModel(outputFile);
+	}
+	
 	public static void train(String inputFile, String outputFile, String configFile, String probsFile) throws Exception {
 		SBTSequenceModel sbtsm = new SBTSequenceModel(configFile);
 		sbtsm.initializeForCorpus(inputFile, sbtsm._struct.numLeaves());
@@ -1515,7 +1542,8 @@ public class SBTSequenceModel implements Serializable {
 			double normalizer = 0.0;
 			for(int i=0; i<ws.length;i++) {
 				ws[i] += STEPSIZE*grad[i];
-				normalizer += ws[i]; //not actually necessary if gradient sums to zero
+				ws[i] = Math.max(0,  ws[i]); //don't go below zero
+				normalizer += ws[i];
 			}
 			for(int i=0; i<ws.length;i++) {
 				ws[i] /= normalizer;
@@ -1755,6 +1783,114 @@ public class SBTSequenceModel implements Serializable {
 		System.out.println("hm is " + hm.length);
 	}
 	
+	//assumes sorted
+	public static double intersectTwo(TIntDoubleHashMap a, TIntDoubleHashMap b, TIntDoubleHashMap c) {
+	   double prod = 0.0;
+	   for(int k : a.keys()) {
+	     if(b.containsKey(k)) {
+	       double d =a.get(k)*b.get(k); 
+	       prod += d;
+	       if(c != null)
+	         c.put(k, d);
+	     }
+	   }
+	   return prod;
+	}
+	
+	public static double intersectThree(TIntDoubleHashMap a, TIntDoubleHashMap b, TIntDoubleHashMap c) {
+	  TIntDoubleHashMap [] hms = new TIntDoubleHashMap [] {a, b, c};
+	  for(int i=0; i<hms.length;i++)
+	    if(hms[i]==null)
+	      hms[i] = new TIntDoubleHashMap();
+	  Arrays.sort(hms, (x, y) -> Integer.compare(x.size(), y.size()));
+	  TIntDoubleHashMap firstTwo = new TIntDoubleHashMap();
+	  double out = intersectTwo(hms[0], hms[1], firstTwo);
+	  out += intersectTwo(hms[0], hms[2], new TIntDoubleHashMap());
+	  out += intersectTwo(hms[1], hms[2], new TIntDoubleHashMap());
+	  out += intersectTwo(firstTwo, hms[2], new TIntDoubleHashMap());
+	  return out;
+	}
+	
+	//returns 3-dim array with {time, count, totalFactor}
+	public static long [] timePass(boolean useSBT, TIntDoubleHashMap [] hmF,
+	    TIntDoubleHashMap [] hmW, 
+	    TIntDoubleHashMap [] hmB,
+	    SBTSequenceModel sbtsm,
+	    int maxCount,
+	    int factorLow,
+	    int factorHigh) {
+	  long [] out = new long [3];
+	  double sum = 0.0;
+    long start = System.currentTimeMillis();
+    long totalFactor = 0L;
+    for(int i=0; i<sbtsm._c._docs.length; i++) {
+      TIntArrayList doc = sbtsm._c._docs[i];
+      for(int j=1; j<doc.size()-1;j++) {
+        int zPrev = sbtsm._c._z[i].get(j-1);
+        int zNext = sbtsm._c._z[i].get(j+1);
+        int wIdx = doc.get(j);
+        TIntDoubleHashMap fw = hmF[zPrev];
+        TIntDoubleHashMap bw = hmB[zNext];
+        TIntDoubleHashMap word = hmW[wIdx];
+        int [] sizes = new int [] {fw.size(), bw.size(), word.size()};
+        Arrays.sort(sizes);
+        int factor = 2 * sizes[0] + sizes[1];
+        if(factor >= factorHigh || factor < factorLow)
+          continue;
+        if(useSBT) {
+          SparseBackoffTree fwSBT = sbtsm._forward[zPrev];
+          SparseBackoffTree bwSBT = sbtsm._backward[zNext];
+          SparseBackoffTree wordSBT = sbtsm._wordToState[wIdx];
+          sum += (new SparseBackoffTreeIntersection(new SparseBackoffTree [] {fwSBT, bwSBT, wordSBT}))._totalMass;
+        }
+        else
+          sum += intersectThree(fw, bw, word);
+        totalFactor += factor;
+        if(++out[1] == maxCount)
+          break;
+      }
+      if(out[1] == maxCount)
+        break;
+    }
+    out[0] = System.currentTimeMillis() - start;
+    out[2] = totalFactor;
+    System.out.println(sum);
+    return out;
+	}
+	
+	public static void timeTrial(String modelFile) throws Exception {
+	  SBTSequenceModel sbtsm = readModel(modelFile);
+	  System.out.println("done reading.");
+	  TIntDoubleHashMap [] hmF = sbtsm.aggregateCounts(-1, sbtsm._c._z, sbtsm._c._docs);
+	  TIntDoubleHashMap [] hmW = sbtsm.aggregateCounts(0, sbtsm._c._z, sbtsm._c._docs);
+	  TIntDoubleHashMap [] hmB = sbtsm.aggregateCounts(1, sbtsm._c._z, sbtsm._c._docs);
+	  System.out.println("Done building hash maps.");
+	  System.out.println("Sampling 20000 words.");
+    
+	  int [] buckets = new int [] {0, 62, 125, 250, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 6000, 8000}; 
+	  int [] cts = new int [buckets.length - 1];
+	  int [] times = new int[buckets.length - 1];
+	  int [] timesHash = new int[buckets.length - 1];
+	  int [] factors = new int[buckets.length - 1];
+	  
+	  for(int b=1; b<buckets.length;b++) {
+	    long [] timeCt = timePass(true, hmF, hmW, hmB, sbtsm, 20000, buckets[b-1], buckets[b]);
+	    times[b-1] = (int)timeCt[0];
+	    cts[b-1] = (int)timeCt[1];
+	    long [] timeCtHash = timePass(false, hmF, hmW, hmB, sbtsm, 20000, buckets[b-1], buckets[b]);
+	    timesHash[b-1] = (int)timeCtHash[0];
+	    factors[b-1] = (int)timeCtHash[2];
+	  }
+	  System.out.println("buckets: " + Arrays.toString(buckets));
+	  System.out.println("SBT times: " + Arrays.toString(times));
+	  System.out.println("Hash times: " + Arrays.toString(timesHash));
+	  System.out.println("Total factors: " + Arrays.toString(factors));
+	  System.out.println("cts: " + Arrays.toString(cts));
+	  for(int i=1; i<buckets.length;i++) {
+	    System.out.println(buckets[i] + "\t" + times[i-1] + "\t" + timesHash[i-1] + "\t" + cts[i-1] + "\t" + factors[i-1]);
+	  }
+	}
+	
 	public static void main(String[] args) throws Exception {
 		if(args.length > 0 && args[0].equalsIgnoreCase("train")) {
 			if(args.length != 4) {
@@ -1763,9 +1899,25 @@ public class SBTSequenceModel implements Serializable {
 			}
 			train(args[1], args[2], args[3]);
 		}
+		else if(args.length > 0 && args[0].equalsIgnoreCase("timeTrial")) {
+		  if(args.length != 2) {
+		    System.err.println("Usage: timeTrial <model_file>");
+        return;
+		  }
+		  else {
+		    timeTrial(args[1]);
+		  }
+		}
+		else if(args.length > 0 && args[0].equalsIgnoreCase("trainFromModel")) { //expands existing model and continues
+		  if(args.length != 5) {
+        System.err.println("Usage: trainFromModel <input_file> <model_output_file> <configuration_file> <model_input_file>");
+        return;
+		  }
+		  extendTraining(args[4], args[1], args[2], args[3]);
+		}
 		else if(args.length > 0 && args[0].equalsIgnoreCase("trainAug")) { //augment existing probs
 			if(args.length != 5) {
-				System.err.println("Usage: train <input_file> <model_output_file> <configuration_file> <probs_file>");
+				System.err.println("Usage: trainAug <input_file> <model_output_file> <configuration_file> <probs_file>");
 				return;
 			}
 			train(args[1], args[2], args[3], args[4]);
@@ -1773,12 +1925,14 @@ public class SBTSequenceModel implements Serializable {
 		else if(args.length > 0 && args[0].equalsIgnoreCase("test")) {
 			if(args.length != 6) {
 				System.err.println("Usage: test <model_file> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>");
+				return;
 			}
 			test(args[1], args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3]);
 		}
 		else if(args.length > 0 && args[0].equalsIgnoreCase("wordreps")) {
 			if(args.length != 3) {
 				System.err.println("Usage: wordreps <model_file> <output_file>");
+				return;
 			}
 			outputWordToTopicFile(args[1], args[2]);
 		}
@@ -1786,6 +1940,7 @@ public class SBTSequenceModel implements Serializable {
 			if(args.length != 6 && args.length != 8) {
 				System.err.println("Usage: test <model_dir> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>"
 						+ " [<validation_file> <num_validation_docs>]");
+				return;
 			}
 			File f = new File(args[1]);
 			if(args.length==6)
@@ -1798,6 +1953,7 @@ public class SBTSequenceModel implements Serializable {
 			if(args.length != 7 && args.length != 9) {
 				System.err.println("Usage: test <model_dir> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>"
 						+ " <probs_out_file> [<validation_file> <num_validation_docs>]");
+				return;
 			}
 			File f = new File(args[1]);
 			if(args.length==7)

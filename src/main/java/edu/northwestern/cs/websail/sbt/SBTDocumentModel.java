@@ -1012,12 +1012,14 @@ public class SBTDocumentModel implements Serializable {
 		else if(args.length > 0 && args[0].equalsIgnoreCase("test")) {
 			if(args.length != 6) {
 				System.err.println("Usage: test <model_file> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>");
+				return;
 			}
 			test(args[1], args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3]);
 		}
 		else if(args.length > 0 && args[0].equalsIgnoreCase("wordreps")) {
 			if(args.length != 3) {
 				System.err.println("Usage: wordreps <model_file> <output_file>");
+				return;
 			}
 			outputWordToTopicFile(args[1], args[2]);
 		}
