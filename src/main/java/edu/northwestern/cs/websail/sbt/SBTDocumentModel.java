@@ -58,9 +58,9 @@ public class SBTDocumentModel implements Serializable {
 	
 	Random _r = new Random();
 	
-	private Corpus _c;
-	
-	//Model information:
+	public Corpus _c;
+
+  //Model information:
 	int [] _branchingFactors;
 	SparseBackoffTreeStructure _struct = null;
 	SparseBackoffTree [] _topicGivenWord = null; 
@@ -98,6 +98,8 @@ public class SBTDocumentModel implements Serializable {
 		_struct = new SparseBackoffTreeStructure(_branchingFactors);
 		initDeltas();
 	}
+	
+	
 	
 	public void initDeltas() {
 		_wordsDelta = new double[_branchingFactors.length];
@@ -207,7 +209,7 @@ public class SBTDocumentModel implements Serializable {
 	public void set_OPTIMIZEINTERVAL(int _OPTIMIZEINTERVAL) {
 		this._OPTIMIZEINTERVAL = _OPTIMIZEINTERVAL;
 	}
-
+	
 	private void setThreadBreaks() {
 		_THREADBREAKS = new int[_NUMTHREADS];
 		long approxToks = _c._NUMTOKENS / (long)_NUMTHREADS;

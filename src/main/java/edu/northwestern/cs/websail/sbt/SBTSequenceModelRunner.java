@@ -320,7 +320,7 @@ public class SBTSequenceModelRunner {
       d[i] /= sum;
   }
   
-  public static double [] testEnsemble(String modelDir, String testFile) throws Exception {
+  public static double [] testEnsemble(String modelDir, String testFile, int maxDocs) throws Exception {
     
     File [] models = new File(modelDir).listFiles();
     SBTSequenceModelRunner [] runner = new SBTSequenceModelRunner[models.length];
@@ -334,7 +334,7 @@ public class SBTSequenceModelRunner {
     double out = 0.0;
     double toks = 0.0;
     
-    TestEnsembleDoer [] tds = new TestEnsembleDoer[c._docs.length];
+    TestEnsembleDoer [] tds = new TestEnsembleDoer[Math.min(c._docs.length, maxDocs)];
     ExecutorService e = Executors.newFixedThreadPool(runner[0]._sbtsm.get_NUMTHREADS());
     //ExecutorService e = Executors.newFixedThreadPool(1);
     for(int i=0; i<tds.length;i++) {
@@ -363,14 +363,14 @@ public class SBTSequenceModelRunner {
     return new double [] {out, toks};
   }
   
-  public static double [] testSingleModel(String modelFile, String testFile) throws Exception {
+  public static double [] testSingleModel(String modelFile, String testFile, int docsToTest) throws Exception {
     SBTSequenceModelRunner runner = new SBTSequenceModelRunner(modelFile);
     Corpus c = new Corpus();
     c.readCorpusDat(testFile, false);
     double out = 0.0;
     double toks = 0.0;
     
-    TestDoer [] tds = new TestDoer[c._docs.length];
+    TestDoer [] tds = new TestDoer[Math.min(docsToTest, c._docs.length)];
     ExecutorService e = Executors.newFixedThreadPool(runner._sbtsm.get_NUMTHREADS());
     //ExecutorService e = Executors.newFixedThreadPool(1);
     for(int i=0; i<tds.length;i++) {
@@ -503,9 +503,9 @@ public class SBTSequenceModelRunner {
   
 	public static void main(String[] args) throws Exception {
 	  //testWordEncoding();
-//	  testEnsemble("e:\\data\\ptb\\ens_cheery", "e:\\data\\ptb\\penn_test.dat");
+	  testEnsemble("e:\\data\\10m\\ens_adv", "e:\\data\\10m\\test.dat", 3080);
 //	  testSingleModel("e:\\data\\10m\\50down\\10m.model.6", "e:\\data\\ptb\\penn_test.dat");
-	  testSingleModel("e:\\data\\10m\\50down\\10m.model.6", "e:\\data\\10m\\test.dat");
+//	  testSingleModel("e:\\data\\10m\\10m-ext.model", "e:\\data\\10m\\test.dat", 3080);
 	  //4 - 138.7
 	  //5 - 139.4
 	  //6 - 142.9

@@ -21,6 +21,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import gnu.trove.iterator.TIntDoubleIterator;
 import gnu.trove.iterator.TIntIterator;
+import gnu.trove.list.array.TDoubleArrayList;
 import gnu.trove.list.array.TIntArrayList;
 import gnu.trove.map.hash.TIntDoubleHashMap;
 
@@ -1488,6 +1489,15 @@ public class SBTSequenceModel implements Serializable {
 
 	public static void extendTraining(String modelFile, String inputFile, String outputFile, String configFile) throws Exception {
 	  SBTSequenceModel sbtsm = readModel(modelFile);
+	  if(sbtsm._c._changeFactor == null) {
+	    sbtsm._c._changeFactor = new TDoubleArrayList[sbtsm._c._z.length];
+	    for(int i=0; i<sbtsm._c._changeFactor.length; i++) {
+	      sbtsm._c._changeFactor[i] = new TDoubleArrayList();
+	      for(int j=0; j<sbtsm._c._z[i].size();j++)
+	        sbtsm._c._changeFactor[i].add(1.0);
+	    }
+	    sbtsm._c.lambda = 0.99; //HACK
+	  }
 	  sbtsm.readConfigFile(configFile);
 	  sbtsm._expansionBranchFactors = sbtsm._branchingFactors;
 	  sbtsm.trainModel(sbtsm._NUMITERATIONS, sbtsm._OPTIMIZEINTERVAL, outputFile, true);
