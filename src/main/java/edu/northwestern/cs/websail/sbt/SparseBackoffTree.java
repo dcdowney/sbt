@@ -388,6 +388,15 @@ public class SparseBackoffTree {
 	  return out;
 	}
 	
+	public static SparseBackoffTree fromDoubleArray(SparseBackoffTreeStructure struct, double [] masses, double [] ds) {
+	  SparseBackoffTree out = new SparseBackoffTree(struct);
+	  for(int i=0; i<masses.length; i++) {
+	    if(masses[i] > 0.0)
+	      out.smoothAndAddMass(i, masses[i], ds);
+	  }
+	  return out;
+	}
+	
 	public static void testDivision() {
 		double [] ds = new double [] {0.24, 0.36, 0.3};
 		SparseBackoffTreeStructure struct = new SparseBackoffTreeStructure(new int [] {2, 2, 3}, ds);

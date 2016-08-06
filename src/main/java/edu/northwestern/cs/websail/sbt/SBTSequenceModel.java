@@ -16,14 +16,17 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.Random;
+import java.util.TreeMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import gnu.trove.iterator.TIntDoubleIterator;
+import gnu.trove.iterator.TIntIntIterator;
 import gnu.trove.iterator.TIntIterator;
 import gnu.trove.list.array.TDoubleArrayList;
 import gnu.trove.list.array.TIntArrayList;
 import gnu.trove.map.hash.TIntDoubleHashMap;
+import gnu.trove.map.hash.TIntIntHashMap;
 
 //TODO: factor out all the gross duplication between this class and SBTDocumentModel
 
@@ -31,6 +34,8 @@ public class SBTSequenceModel implements Serializable {
 
 	private static final long serialVersionUID = 2L;
 
+	
+	
 	private class GibbsDoer implements Runnable {
     	int _start;
     	int _end;
@@ -40,7 +45,28 @@ public class SBTSequenceModel implements Serializable {
     		_changes = sampleRange(_start, _end);
     	}
     }
-	
+
+	private class EMDoer implements Runnable {
+    int _start;
+    int _end;
+    int _numStates;
+    int _numWords;
+    
+    double [][] _transAcc;
+    double [][] _wordAcc;
+    double [] _startAcc;
+    double [] _endAcc;
+    double _loglikelihood;
+    
+    public void run() {
+      _transAcc = new double[_numStates][_numStates];
+      _wordAcc = new double[_numWords][_numStates];
+      _startAcc = new double[_numStates];
+      _endAcc = new double[_numStates];
+      _loglikelihood = emRange(_start, _end, _transAcc, _startAcc, _endAcc, _wordAcc);
+    }
+  }
+
     private class TestDoer implements Runnable {
     	int _doc;
     	double [] _wordTopicMarginal;
@@ -149,6 +175,16 @@ public class SBTSequenceModel implements Serializable {
 	double [] _backwardDelta = null;
 	double [] _wordDelta = null;
 	
+	double [][] _forwardArrays;
+	double [][] _backwardArrays;
+	double [] _startArray;
+	double [] _endArray;
+
+  double [][] _transAcc;
+  double [][] _wordAcc;
+  double [] _startAcc;
+  double [] _endAcc;
+	
 	Corpus _c;
 	
 	double [][] baseProbs = null; //holds existing model probabilities when training a layer of an ensemble
@@ -173,6 +209,7 @@ public class SBTSequenceModel implements Serializable {
 	//testing config:
 	protected int _NUMPARTICLES = -1;
 	private int _MAXTESTDOCSIZE = -1;
+	private final boolean GIBBS = false;
 	
 	private int _numSkipWords = 0;
 	
@@ -476,6 +513,207 @@ public class SBTSequenceModel implements Serializable {
 		return out;
 	}
 
+	private double [][] sbtToArrays(SparseBackoffTree [] sbt) {
+	  double [][] out = new double[sbt.length][];
+	  for(int i=0; i<out.length; i++) {
+	    out[i] = sbt[i].toDoubleArray();
+	  }
+	  return out;
+	}
+	
+	private void initArraysFromSBTs() {
+	  this._forwardArrays = sbtToArrays(this._forward);
+    this._backwardArrays = sbtToArrays(this._backward);
+	  for(int i=0; i<_forwardArrays.length;i++) {
+	    SBTSequenceModelRunner.normalize(_forwardArrays[i]);
+	   // SBTSequenceModelRunner.normalize(_backwardArrays[i]);
+	  }
+	  this._startArray = this._startState.toDoubleArray();
+	  this._endArray = this._endState.toDoubleArray();
+	}
+	
+//IntDouble version:	
+//	protected double [][] computeMessages(int docid, boolean forward) {
+//	  
+//	  TIntDoubleHashMap [] trans = this._forwardArrays;
+//	  double [] stateDs = this._forwardDelta;
+//	  TIntDoubleHashMap startTrans = this._startArray;
+//	  if(!forward) {
+//	    trans = this._backwardArrays;
+//	    startTrans = this._endArray;
+//	    stateDs = this._backwardDelta;
+//	  }
+//	  int numStates = _struct.numLeaves();
+//    double [] pState = new double[numStates];
+//    
+//    double [] nextPState = new double[numStates];
+//    double [] nextPStateCt = new double[numStates];
+//    TIntArrayList ws = this._c._docs[docid];
+//    double [][] out = new double[ws.size()][numStates];
+//    for(int w=0; w<ws.size(); w++) {
+//      int word = ws.get(w);
+//      //compute next state dist:
+//      if(w==0) {
+//        SBTSequenceModelRunner.fillStartState(nextPState, nextPStateCt, startTrans);
+//      }
+//      else
+//        for(int i=0; i<numStates;i++) {
+//          if(pState[i] > 0.0) {
+//            SBTSequenceModelRunner.incrementNextState(pState[i], nextPState, nextPStateCt, trans[i]);
+//          }
+//        }
+//      
+//      SparseBackoffTree sbtNext = new SparseBackoffTree(_struct);
+//      for(int i=0; i<numStates;i++) {
+//        sbtNext.smoothAndAddMass(i, nextPState[i], SBTSequenceModelRunner.weightedSmooth(nextPStateCt[i], stateDs));
+//      }
+//      SparseBackoffTree sbtWord = this._wordToState[word];
+////      SparseBackoffTreeIntersection sbti = new SparseBackoffTreeIntersection(new SparseBackoffTree [] {sbtNext, sbtWord});
+//      pState = sbtNext.toDoubleArray();
+//      SBTSequenceModelRunner.normalize(pState);
+//      double [] pWord = sbtWord.toDoubleArray();
+//      double likelihood = 0.0;
+//      for(int i=0; i<numStates; i++) {
+//        pState[i] *= pWord[i];
+//        
+//        likelihood += pState[i];
+//      }
+//      Arrays.fill(nextPState, 0.0);
+//      Arrays.fill(nextPStateCt, 0.0);
+//    }
+//    return out;
+//	}
+
+	 protected double [][] computeMessages(int docid, boolean forward, double [] logLikelihoodAndCount) {
+	   TIntArrayList ws = this._c._docs[docid];
+     
+	   
+	    double [][] trans = this._forwardArrays;
+	    double [] stateDs = this._forwardDelta;
+	    double [] startTrans = this._startArray;
+	    int start = 0;
+	    int end = ws.size();
+	    int inc = 1;
+	    if(!forward) {
+	      trans = this._backwardArrays;
+	      startTrans = this._endArray;
+	      stateDs = this._backwardDelta;
+	      end = -1;
+	      start = ws.size()-1;
+	      inc = -1;
+	    }
+	    int numStates = _struct.numLeaves();
+	    double [] pState = new double[numStates];
+	    double [][] record = new double [ws.size()][numStates];
+	    double [] likerecord = new double [ws.size()];
+	    double [] baserecord = new double[ws.size()];
+	    double [] nextPState = new double[numStates];
+	    double [] nextPStateCt = new double[numStates];
+	    double [][] out = new double[ws.size()][numStates];
+	    double LL = 0.0;
+	    for(int w=start; w!=end; w+= inc) {
+	      int word = ws.get(w);
+	      //compute next state dist:
+	      if(w==start) {
+	        nextPState = Arrays.copyOf(startTrans, numStates);
+	      }
+	      else
+	        for(int i=0; i<numStates;i++) {
+	          if(pState[i] > 0.0) {
+	            for(int j=0; j<numStates;j++) {
+	              nextPState[j] += pState[i]*trans[i][j];
+	            }
+	          }
+	        }
+	      
+//	      SparseBackoffTree sbtNext = new SparseBackoffTree(_struct);
+//	      for(int i=0; i<numStates;i++) {
+//	        sbtNext.smoothAndAddMass(i, nextPState[i], SBTSequenceModelRunner.weightedSmooth(nextPStateCt[i], stateDs));
+//	      }
+	      SparseBackoffTree sbtWord = this._wordToState[word];
+//	      SparseBackoffTreeIntersection sbti = new SparseBackoffTreeIntersection(new SparseBackoffTree [] {sbtNext, sbtWord});
+	      pState = Arrays.copyOf(nextPState, pState.length);
+	      SBTSequenceModelRunner.normalize(pState);
+	      double likelihood = 0.0;
+	      double [] pWord = sbtWord.toDoubleArray();
+	      for(int i=0; i<numStates; i++) {
+	        pState[i] *= pWord[i]/((double)this.get_NUMTOKENS()/((double)numStates));
+	        out[w][i] = pState[i];
+	        likelihood += pState[i];
+	        record[w][i] = pState[i];
+	      }
+	      likerecord[w] = likelihood;
+	      baserecord[w] = sbtWord._totalMass/((double)this.get_NUMTOKENS());
+	      LL += Math.log(likelihood);
+	      SBTSequenceModelRunner.normalize(out[w]);
+	      Arrays.fill(nextPState, 0.0);
+	      Arrays.fill(nextPStateCt, 0.0);
+	    }
+	    if(logLikelihoodAndCount != null) {
+	      logLikelihoodAndCount[0] = LL;
+	      logLikelihoodAndCount[1] = ws.size();
+	    }
+	    return out;
+	  }
+
+	 protected double emDoc(int docId, double [][] transAcc, double [] startAcc, double [] endAcc, double [][] prodAcc) {
+	    TIntArrayList doc = _c._docs[docId];
+	    double [] logLikelihoodAndCount = new double [2];
+	    double [][] fm = this.computeMessages(docId, true, logLikelihoodAndCount);
+	    double [][] bm = this.computeMessages(docId, false, null);
+	    //System.out.println("adding " + docCts.toString());
+	    
+	    int numStates= this._forward.length;
+
+	    //handle start state (no word here):
+	    double [] stProb = new double[numStates];
+	    double sum = 0.0;
+	    for(int j=0; j<numStates; j++) {
+	      stProb[j] = this._startArray[j]*bm[0][j];
+	      sum += stProb[j];
+	    }
+	    for(int j=0; j<numStates;j++) {
+	      startAcc[j] += stProb[j] / sum;
+	    }
+	    //start at word i:
+	    for(int i=0; i<doc.size()-1;i++) {
+	      Arrays.fill(stProb, 0.0);
+ 	      double [][] transCt = new double[numStates][numStates];
+ 	      double [] f;
+ 	      double [] b;
+        f = fm[i];
+        b = bm[i+1];
+	      sum = 0.0;
+	      for(int j=0; j<numStates; j++) {
+	        for(int k=0; k<numStates; k++) {
+	          transCt[j][k] = this._forwardArrays[j][k]*f[j]*b[k];
+	          sum += transCt[j][k]; 
+	        }
+	      }
+        for(int j=0; j<numStates; j++) {
+          for(int k=0; k<numStates; k++) {
+            transCt[j][k] /= sum;
+            transAcc[j][k] += transCt[j][k];
+            stProb[j] += transCt[j][k];
+          }
+          prodAcc[doc.get(i)][j] += stProb[j];
+        }
+	    }
+ 	    //handle end and last word:
+	    Arrays.fill(stProb, 0.0);
+	    sum = 0.0;
+	    for(int j=0; j<numStates;j++) {
+	      stProb[j] = fm[doc.size()-1][j]*this._endArray[j];
+	      sum += stProb[j];
+	    }
+	    for(int j=0; j<numStates;j++) {
+	      stProb[j] /= sum;
+	      endAcc[j] += stProb[j];
+	      prodAcc[doc.get(doc.size()-1)][j] += stProb[j];
+	    }
+	    return logLikelihoodAndCount[0];
+	  }
+	 
 	//scans doc, resampling each variable.  Not used at test time.
 	//returns number of changes
 	protected int sampleDoc(int docId) {
@@ -590,8 +828,23 @@ public class SBTSequenceModel implements Serializable {
 				_numSkipWords++;
 			}
 		}
-		else
-			sample = sbti.sample(_r);
+		else {
+		  //return the max:
+//		  TIntIntHashMap hmC = new TIntIntHashMap();
+//		  for(int i=0; i<30; i++) {
+//		    sample = sbti.sample(_r);
+//		    hmC.adjustOrPutValue(sample, 1, 1);
+//		  }
+//      int maxCt = 0;
+//		  for(int k : hmC.keys()) {
+//		    int ct = hmC.get(k);
+//		    if(ct > maxCt) {
+//		      maxCt = ct;
+//		      sample = k;
+//		    }
+//		  }
+		  sample = sbti.sample(_r);
+		}
 		return sample;
 	}
 	
@@ -604,7 +857,15 @@ public class SBTSequenceModel implements Serializable {
 		}
 
 		return chg;
-    }	
+    }
+    
+    private double emRange(int start, int end, double [][] transAcc, double [] startAcc, double [] endAcc, double [][] prodAcc) {
+      double out = 0.0;
+      for(int i=start; i<=end; i++) {
+        out += emDoc(i, transAcc, startAcc, endAcc, prodAcc);
+      }
+      return out;
+    }
 	
 
 	public void initZ(TIntArrayList [] ds, int maxVal, boolean random, boolean scratch) {
@@ -722,6 +983,98 @@ public class SBTSequenceModel implements Serializable {
 		return out;
 	}
 	
+	//TODO: remove redundancy with code directly above.
+	public SparseBackoffTree [] getParamsFromHash(double [] dsWords, int from, TIntDoubleHashMap [] hm) {
+    SparseBackoffTree [] out = new SparseBackoffTree[hm.length];
+    
+    for(int i=0; i<hm.length; i++) {
+      out[i] = new SparseBackoffTree(_struct);
+    }
+    
+    //add:
+    for(int i=0; i<hm.length; i++) {
+      if(hm[i] == null)
+        continue;
+      TIntDoubleIterator it = hm[i].iterator();
+      while(it.hasNext()) {
+        it.advance();
+        int z = it.key();
+        double val = it.value();
+        out[i].smoothAndAddMass(z, val, dsWords);
+      }
+    }
+    return out;	  
+	}
+	
+	public TIntDoubleHashMap [] accToHash(int from) {
+	  TIntDoubleHashMap [] out;
+	  if(from==-2) { //start
+	    out = new TIntDoubleHashMap[1];
+	    out[0] = new TIntDoubleHashMap();
+	    for(int i=0; i<this._startAcc.length;i++) {
+	      out[0].put(i, _startAcc[i]);
+	    }
+	  }
+    else if(from ==-1) { //forward
+      out = new TIntDoubleHashMap[_forwardArrays.length];
+      for(int i=0; i<out.length;i++) {
+        out[i] = new TIntDoubleHashMap();
+      }
+      for(int j=0; j<this._transAcc.length;j++) {
+        for(int k=0; k<this._transAcc[j].length; k++) {
+            out[j].put(k, _transAcc[j][k]);
+        }
+      }
+    }
+
+	  else if(from==0) { //word
+	    out = new TIntDoubleHashMap[_wordAcc.length];
+	    for(int i=0; i<out.length; i++) {
+	      out[i] = new TIntDoubleHashMap();
+	      for(int j=0; j<_wordAcc[i].length; j++) {
+	        out[i].put(j, _wordAcc[i][j]);
+	      }
+	    }
+	  }
+	   else if(from==1) { //backward
+	      out = new TIntDoubleHashMap[_backwardArrays.length];
+	      for(int i=0; i<out.length;i++) {
+	        out[i] = new TIntDoubleHashMap();
+	      }
+	      for(int j=0; j<this._transAcc.length;j++) {
+	        for(int k=0; k<this._transAcc[j].length; k++) {
+	            out[k].put(j, _transAcc[j][k]);
+	        }
+	      }
+	    }
+	   else { //end state
+      out = new TIntDoubleHashMap[1];
+      out[0] = new TIntDoubleHashMap();
+      for(int i=0; i<this._endAcc.length;i++) {
+        out[0].put(i, _endAcc[i]);
+      }
+	  }
+	  return out;
+	}
+	
+	public TIntDoubleHashMap expandHash(TIntDoubleHashMap hm, int multiplier) {
+	  TIntDoubleHashMap out = new TIntDoubleHashMap();
+	  TIntDoubleIterator it = out.iterator();
+	  while(it.hasNext()) {
+	    it.advance();
+	    int base = it.key()*multiplier;
+	    for(int i=base; i<base+multiplier; i++) {
+	      out.put(i, Math.max(0.0, it.value()/(double)multiplier));
+	    }
+	  }
+	  return out;
+	}
+		
+	public SparseBackoffTree [] getParamsFromAccs(double [] ds, int from) {
+	  TIntDoubleHashMap [] hm = accToHash(from);
+	  return getParamsFromHash(ds, from, hm);
+	}
+	
 	/**
 	 * reads the corpus and initializes zs and model
 	 * @param inFile
@@ -770,7 +1123,49 @@ public class SBTSequenceModel implements Serializable {
     	return changes;
     }
 	
-    
+    //TODO: remove redundancy with gibbsPass
+    private double emPass() { 
+      double loglikelihood= 0 ;
+      EMDoer [] eds = new EMDoer[_NUMTHREADS];
+      long stTime = System.currentTimeMillis();
+      ExecutorService e = Executors.newFixedThreadPool(_NUMTHREADS);
+      int numStates = this._forwardArrays.length;
+      int numWords = this.get_VOCABSIZE();
+      _startAcc = new double [numStates];
+      _transAcc = new double[numStates][numStates];
+      _endAcc = new double[numStates];
+      _wordAcc = new double[numWords][numStates];
+      for(int i=0; i<_NUMTHREADS;i++) {
+        eds[i] = new EMDoer();
+        eds[i]._start = 0;
+        if(i > 0)
+          eds[i]._start = _THREADBREAKS[i-1] + 1;
+        eds[i]._end = _THREADBREAKS[i];
+        eds[i]._numStates = numStates;
+        eds[i]._numWords = numWords;
+        e.execute(eds[i]);
+      }
+      e.shutdown();
+      boolean terminated = false;
+      while(!terminated) {
+        try {
+          terminated = e.awaitTermination(60,  TimeUnit.SECONDS);
+        }
+        catch (InterruptedException ie) {
+          
+        }
+      }
+      for(int i=0; i<_NUMTHREADS; i++) {
+        loglikelihood += eds[i]._loglikelihood;
+        reduce(eds[i]);
+      }
+      stTime = System.currentTimeMillis() - stTime;
+      System.out.println("\ttime: " + stTime + "\tLL: " + loglikelihood + "\tskipWords: " + _numSkipWords);
+      //System.out.println("state marginal: " + Arrays.toString(this._wordStateMarginal));
+      _numSkipWords = 0;
+      //System.out.println(Arrays.toString(_topicMarginal));
+      return loglikelihood;
+    }    
     
 	//returns array of amt_i
 	//such that if we divide leaf counts by amt_i, we get smoothing with marginal P(z)
@@ -815,6 +1210,47 @@ public class SBTSequenceModel implements Serializable {
 		}
 		return out;
 	}
+	
+	public void reduce(EMDoer ed) {
+	  for(int i=0; i<_startAcc.length;i++) {
+	    _startAcc[i] += ed._startAcc[i];
+	    _endAcc[i] += ed._endAcc[i];
+	  }
+	  for(int i=0; i<_wordAcc.length;i++) {
+	    for(int j=0; j<_wordAcc[i].length; j++) {
+	      _wordAcc[i][j] += ed._wordAcc[i][j];
+	    }
+	  }
+    for(int i=0; i<_transAcc.length;i++) {
+      for(int j=0; j<_transAcc[i].length; j++) {
+        _transAcc[i][j] += ed._transAcc[i][j];
+      }
+    }	  
+	}
+	
+	public void updateModelFromEM() {
+	  
+	  System.out.println("arch: " + Arrays.toString(this._branchingFactors));
+    this._startState = getParamsFromAccs(_forwardDelta, -2)[0];
+    this._forward = getParamsFromAccs(_forwardDelta, -1);
+    this._backward = getParamsFromAccs(_backwardDelta, 1);
+    this._endState = getParamsFromAccs(_backwardDelta, 2)[0];
+    this._wordToState = getParamsFromAccs(_wordDelta, 0);
+    SparseBackoffTree [] comb = Arrays.copyOf(_backward, _backward.length + 1);
+    comb[_backward.length] = _endState;
+    this._backwardStateMarginal = getNormalizers(comb, _struct);
+    this._wordStateMarginal = getNormalizers(_wordToState, _struct);
+    for(int i=0; i<_backward.length; i++) {
+      _backward[i].divideCountsBy(_backwardStateMarginal);
+    }
+    this._endState.divideCountsBy(_backwardStateMarginal);
+    for(int i=0; i<_wordToState.length; i++) {
+      _wordToState[i].divideCountsBy(_wordStateMarginal); 
+    }
+    System.out.println("\tdiscounts forward: " + Arrays.toString(_forwardDelta) + 
+        "\tbackward " + Arrays.toString(_backwardDelta) +
+            "\tword " + Arrays.toString(_wordDelta));
+  }
 	
 	/**
 	 * Updates the model given the topic assignments (_z) and divides by marginal for next sampling pass
@@ -1102,13 +1538,28 @@ public class SBTSequenceModel implements Serializable {
      */
     public boolean expandModel(int expansionIndex) {
     	if(expansionIndex < _EXPANSIONSCHEDULE.length) {
-    		int curLeaves = _struct.numLeaves(); 
+    	  int curLeaves = _struct.numLeaves(); 
+    	  if(!GIBBS) {
+    	    System.out.println("executing special expansion gibbs for EM");
+    	    initZ(_c._docs, curLeaves, false, true); //init scratch array to zero
+          gibbsPass();
+          _c._z = _c._scratchZ;
+          initZ(_c._docs, curLeaves, false, true); //init scratch array to zero
+          gibbsPass();
+          _c._z = _c._scratchZ;
+          initZ(_c._docs, curLeaves, false, true); //init scratch array to zero
+          gibbsPass();
+          _c._z = _c._scratchZ;
+          initZ(_c._docs, curLeaves, false, true); //init scratch array to zero
+          gibbsPass();
+          _c._z = _c._scratchZ;
+    	  }
     		//get new structure
     		_branchingFactors = Arrays.copyOf(this._expansionBranchFactors, _EXPANSIONSCHEDULE[expansionIndex] + 1);
     		_struct = new SparseBackoffTreeStructure(_branchingFactors);
     		initDeltas();
-    		int multiplier = _struct.numLeaves()/curLeaves;
-    		System.out.println("Expanding to " + Arrays.toString(_branchingFactors));
+        int multiplier = _struct.numLeaves()/curLeaves;
+        System.out.println("Expanding to " + Arrays.toString(_branchingFactors));
     		for(int i=0; i<_c._z.length;i++) {
     			for(int j=0; j<_c._z[i].size(); j++) {
     				int z = multiplier * _c._z[i].get(j) + _r.nextInt(multiplier);
@@ -1125,6 +1576,38 @@ public class SBTSequenceModel implements Serializable {
     
     public void trainModel(int iterations, int updateInterval, String outFile) throws Exception {
       trainModel(iterations, updateInterval, outFile, false);
+    }
+    
+    public void translateStates(TIntArrayList [] zs, TIntIntHashMap trans) {
+      for(int i=0; i<zs.length; i++) { 
+        for(int j=0; j<zs[i].size(); j++) {
+          zs[i].set(j, trans.get(zs[i].get(j)));
+        }
+      }
+    }
+    
+    public void renumberStatesForCompression(TIntArrayList [] zs) { //changes states in zs to make more frequent states have lower ids
+      TIntIntHashMap stateCount = new TIntIntHashMap();
+      TIntIntHashMap stateTranslation = new TIntIntHashMap();
+      for(int i=0; i<zs.length; i++) {
+        for(int j=0; j<zs[i].size(); j++)
+        stateCount.adjustOrPutValue(zs[i].get(j), 1, 1);
+      }
+      TreeMap<Double, Integer> sortedStates = new TreeMap<>(Collections.reverseOrder());
+      TIntIntIterator it = stateCount.iterator();
+      while(it.hasNext()) {
+        it.advance();
+        double freq = it.value();
+        while(sortedStates.containsKey(freq)) { //break ties arbitrarily
+          freq -= 0.0000001; //HACK (gross)
+        }
+        sortedStates.put(freq, it.key());
+      }
+      int ct = 0;
+      for(double d : sortedStates.keySet()) {
+        stateTranslation.put(sortedStates.get(d), ct++);
+      }
+      translateStates(zs, stateTranslation);
     }
     
     /**
@@ -1144,13 +1627,29 @@ public class SBTSequenceModel implements Serializable {
 		while(!done) {
 			for(int i=1; i<=iterations; i++) {
 				System.out.print(i + ": ");
-				initZ(_c._docs, maxVal, false, true); //init scratch array to zero
-				gibbsPass();
-				if((i % updateInterval)==0) { 
-					optimizeParameters(_c._scratchZ);
+				if(GIBBS) {
+  				initZ(_c._docs, maxVal, false, true); //init scratch array to zero
+  				gibbsPass();
+          if((i % updateInterval)==0) { 
+            optimizeParameters(_c._scratchZ);
+//            if(j==0)
+//              renumberStatesForCompression(_c._scratchZ);
+          }
+          updateModel(_c._scratchZ);
+          _c._z = _c._scratchZ;
 				}
-				updateModel(_c._scratchZ);
-				_c._z = _c._scratchZ;
+				else {
+				  this.initArraysFromSBTs();
+				  emPass();
+				  if((i % updateInterval)==0) { 
+				    for(int k=0; k<this._forwardDelta.length;k++) {
+				      _forwardDelta[k] *= 0.97;
+				      _backwardDelta[k] *= 0.97;
+				      _wordDelta[k] *= 0.98;
+				    }
+				  }
+				  updateModelFromEM();
+				}
 			}
 			if(this._USEEXPANSION == 1) {
 				writeModel(outFile + "." + j);
@@ -1191,7 +1690,12 @@ public class SBTSequenceModel implements Serializable {
 		SBTSequenceModel out = (SBTSequenceModel) ois.readObject();
 		ois.close();
 		out._struct = new SparseBackoffTreeStructure(out._branchingFactors);
-		out.updateModel(out._c._z);
+		if(out._endArray != null) {
+		  System.out.println("arrays found, loading from arrays.");
+		  out.updateModelFromEM();
+		}
+		else
+		  out.updateModel(out._c._z);
 		return out;
 	}
 	

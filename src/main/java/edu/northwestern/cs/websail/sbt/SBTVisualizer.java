@@ -14,19 +14,25 @@ import gnu.trove.map.hash.TIntDoubleHashMap;
 
 public class SBTVisualizer {
 
-  //from http://stackoverflow.com/questions/1265282/recommended-method-for-escaping-html-in-java
+  //adapted from http://stackoverflow.com/questions/1265282/recommended-method-for-escaping-html-in-java
   public static String escapeHTML(String s) {
     StringBuilder out = new StringBuilder(Math.max(16, s.length()));
     for (int i = 0; i < s.length(); i++) {
         char c = s.charAt(i);
-        if (c > 127 || c == '"' || c == '<' || c == '>' || c == '&') {
-            out.append("&#");
-            out.append((int) c);
-            out.append(';');
+        //if (c > 127 || c == '"' || c == '<' || c == '>' || c == '&') {
+        if (c == '"' || c == '\\') {
+            out.append("\\" + c);
+            
+//            out.append((int) c);
+//            out.append(';');
         } else {
             out.append(c);
         }
     }
+    if(out.length() == 0)
+      return "NULL";
+    if(out.toString().equals("'"))
+      return "SINGQ";
     return out.toString();
 }
   
@@ -81,6 +87,28 @@ public class SBTVisualizer {
     bwOut.close();
   }
   
+  public static void showChars(String inFile, int targetChar) throws Exception {
+    BufferedReader brIn = new BufferedReader(
+        new InputStreamReader(new FileInputStream(inFile), "UTF8" ));
+    String sLine;
+    int ct = 0;
+    while((sLine = brIn.readLine())!=null) {
+      if(ct > targetChar - 100 && ct < targetChar + 100) {
+        System.out.println("L: " + sLine);
+      }
+      if(ct <= targetChar && ct+sLine.length() >= targetChar) {
+        System.out.println("problem line: ");
+        System.out.println(sLine);
+        System.out.println("problem char in center of: ");
+        int lbound = Math.max(0, targetChar - (ct + 2));
+        int rbound = Math.min(sLine.length(), targetChar - (ct - 2));
+        System.out.println(sLine.substring(lbound, rbound));
+      }
+      ct += sLine.length() + 1;
+    }
+    brIn.close();
+  }
+  
 //this function writes json
  public static void writingHelper(BufferedWriter bwOut, SparseBackoffTreeStructure curr, int indent, HashMap<Integer,TreeMap<Integer,Double>> topic,
      HashMap<Integer, String> dict) throws Exception {
@@ -114,21 +142,27 @@ public class SBTVisualizer {
        
        int idx = 0;
        if(topic.get(topNum) != null) {
-
+         bwOut.write(ind + "\t\t{\"name\": \"");
+         String vals = "";
          for(int k : topic.get(topNum).keySet()){
            if(idx > 0 && idx < per){
-             bwOut.write(",\n" + ind + "\t\t{\"name\": \"" + dict.get(k) + " " + topic.get(topNum).get(k) + "\"}");
+             bwOut.write(" " + dict.get(k));
+             vals += topic.get(topNum).get(k) + " ";
            }
            else if(idx == per){
              break;
            }
            else{
-             bwOut.write(ind + "\t\t{\"name\": \"" + dict.get(k) + " " + topic.get(topNum).get(k) + "\"}");
+             bwOut.write(dict.get(k));
+             vals += topic.get(topNum).get(k) + " ";
            }
            idx ++;
          }
-       }       
-       bwOut.write("\n" + ind + "\t]");
+         bwOut.write("\"");
+         bwOut.write(", \"value\": \"" + vals + "\"");
+         bwOut.write("}\n" + ind);
+       }
+       bwOut.write("\t]");
        if(j < len - 1){
          bwOut.write("\n" + ind + "\t},\n");
        }
@@ -155,16 +189,16 @@ public class SBTVisualizer {
        TIntDoubleIterator it = hm.iterator();
        while(it.hasNext()) {
          it.advance();
-         int wId = it.key();
-         double val = it.value();
-         if(word_givenTopic.containsKey(wId)){
-                       HashMap<Integer,Double> sublist = word_givenTopic.get(wId);
+         int sId = it.key();
+         double val = it.value()/c._pWord[i];
+         if(word_givenTopic.containsKey(sId)){
+                       HashMap<Integer,Double> sublist = word_givenTopic.get(sId);
                        sublist.put(i,val);
          }else{
            @SuppressWarnings("rawtypes")
            HashMap<Integer,Double> sublist = new HashMap();
            sublist.put(i,val);
-           word_givenTopic.put(wId,sublist);
+           word_givenTopic.put(sId,sublist);
          }
        }
      }
@@ -206,7 +240,7 @@ static class ByValueComparator implements Comparator<Integer> {
 }
   
   public static void main(String[] args) throws Exception {
-    // TODO Auto-generated method stub
+//    showChars(args[0], 337266);
     if(args.length != 4) {
       System.err.println("usage: SBTVisualizer <modelType=doc|seq> <model file> <output file> <dictionary file>");
       return;

@@ -1,9 +1,14 @@
 package edu.northwestern.cs.websail.sbt;
 
 import java.io.File;
+import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -17,8 +22,10 @@ import edu.berkeley.nlp.lm.collections.TIntMap;
 import edu.berkeley.nlp.lm.io.LmReaders;
 import edu.berkeley.nlp.lm.util.Logger;
 import gnu.trove.iterator.TIntDoubleIterator;
+import gnu.trove.iterator.TIntIntIterator;
 import gnu.trove.list.array.TIntArrayList;
 import gnu.trove.map.hash.TIntDoubleHashMap;
+import gnu.trove.map.hash.TIntIntHashMap;
 
 public class SBTSequenceModelRunner {
 
@@ -38,6 +45,10 @@ public class SBTSequenceModelRunner {
   TIntDoubleHashMap [] _stateToState; //temporary state-to-state
   TIntDoubleHashMap _startState; //temporary start state
   
+  TIntIntHashMap _translationTable; //maps stored state onto real state
+
+  public int _singles = 0;
+  
   double [] _wordMarginal; //holds marginal to divide by for words
       //TODO: remove this dependency?
   double [] _wordDs;
@@ -45,7 +56,7 @@ public class SBTSequenceModelRunner {
   
   double [] _wordDivider; //holds marginal to divide *counts* by for words
   
-  public static final int RADIX = 4;
+  public static final int RADIX = 3;
   
   
   public SBTSequenceModelRunner(String sbtFile) throws Exception {
@@ -53,6 +64,8 @@ public class SBTSequenceModelRunner {
     _sbtsm = sbtsm;
     _struct = sbtsm._struct;
     _wordMarginal = SBTSequenceModel.getCheckMarginal(sbtsm._wordToState, sbtsm._struct);
+    _translationTable = getTranslationTable(sbtsm);
+
     _tData = encodeTransData(sbtsm);
     _tStartData = encodeStartData(sbtsm);
     _dict = new TIntMap<String>();
@@ -60,7 +73,6 @@ public class SBTSequenceModelRunner {
     _forwardDs = sbtsm._forwardDelta;
     _wordDs = sbtsm._wordDelta;
     _wordDivider = sbtsm._wordStateMarginal;
-    
     _wData = encodeWordData(sbtsm);
     System.out.println("run berkeley compression to get dictionary size.");
     System.out.println("transition model size: " + _tData.size()*64 + " bits.");
@@ -68,6 +80,7 @@ public class SBTSequenceModelRunner {
     System.out.println("word model size: " + _wData.size()*64 + " bits.");
     System.out.println("total: " + (_tData.size()*64 +_tStartData.size()*64 + _wData.size()*64));
     System.out.println("NEED TO ADD WORD MARGINAL and discounts");
+    System.out.println("singles: " + _singles);
   }
   
   private class TestDoer implements Runnable {
@@ -144,6 +157,7 @@ public class SBTSequenceModelRunner {
     while(it.hasNext()) {
       it.advance();
       int k = it.key();
+//      k = _translationTable.get(k);
       int v = (int)Math.round(it.value());
       al.add(new IntDouble(k, v));
     }
@@ -152,8 +166,10 @@ public class SBTSequenceModelRunner {
     for(int i=0; i<al.size(); i++) {
       int k = al.get(i).i;
       int v = (int)Math.round(al.get(i).d);
+      if(v==1)
+        _singles++;
       bl.addAll(CompressionUtils.variableCompress(k-kLast, RADIX));
-      bl.addAll(CompressionUtils.variableCompress(v, RADIX));
+      bl.addAll(CompressionUtils.variableCompress(v-1, RADIX));
       kLast = k;
     }
     return bl;
@@ -167,9 +183,60 @@ public class SBTSequenceModelRunner {
     return out;
   }
   
+  public TIntIntHashMap getTranslationTable(SBTSequenceModel sbtsm) {
+    TIntDoubleHashMap [] fw = sbtsm.aggregateCounts(-1, sbtsm._c._z, sbtsm._c._docs); 
+    TIntIntHashMap freq = new TIntIntHashMap();
+
+    for(int i=0; i<fw.length; i++) {
+      if(fw[i] == null)
+        continue;
+      TIntDoubleIterator it = fw[i].iterator();
+      while(it.hasNext()) {
+        it.advance();
+        freq.adjustOrPutValue(it.key(), 1, 1);
+      }
+    }
+
+    TIntDoubleHashMap [] wordSt = sbtsm.aggregateCounts(0, sbtsm._c._z, sbtsm._c._docs); 
+
+    for(int i=0; i<wordSt.length; i++) {
+      if(wordSt[i] == null)
+        continue;
+      TIntDoubleIterator it = wordSt[i].iterator();
+      while(it.hasNext()) {
+        it.advance();
+        freq.adjustOrPutValue(it.key(), 1, 1);
+      }
+    }
+    
+    ArrayList<Map.Entry<Integer, Integer>> stateFreq = new ArrayList<>();
+    TIntIntIterator it = freq.iterator();
+    while(it.hasNext()) {
+      it.advance();
+      Map.Entry<Integer, Integer> e = new AbstractMap.SimpleImmutableEntry<Integer, Integer>(it.key(), it.value());
+      stateFreq.add(e);
+    }
+    //sort by value desc:
+    stateFreq.sort(new Comparator<Map.Entry<Integer, Integer>>(){
+        @Override
+        public int compare(Map.Entry<Integer, Integer> e1, Map.Entry<Integer, Integer> e2) {
+          return -e1.getValue().compareTo(e2.getValue());
+        }
+    });
+    
+    freq = new TIntIntHashMap(); //re-use
+    int ct = 0;
+    for(Map.Entry<Integer, Integer> e : stateFreq) {
+      freq.put(e.getKey(), ct++);
+    }
+    return freq;
+  }
+  
   public LongArray encodeTransData(SBTSequenceModel sbtsm) {
     LongArray out = new LongArray(100L);
-    TIntDoubleHashMap [] fw = sbtsm.aggregateCounts(-1, sbtsm._c._z, sbtsm._c._docs);
+    TIntDoubleHashMap [] fw = sbtsm.aggregateCounts(-1, sbtsm._c._z, sbtsm._c._docs); 
+    TIntIntHashMap freq = new TIntIntHashMap();
+        
     //temporary:
     _stateToState = fw;
     
@@ -201,12 +268,15 @@ public class SBTSequenceModelRunner {
     int offset = 0;
     BitList bOut = new BitList();
     int wordParams = 0;
+    boolean OUTPUTWORDS = false;
     for(int i=0; i<wc.length; i++) {
       TIntDoubleHashMap hm = wc[i];
       if(hm == null)
         continue;
       BitList bl = new BitList();
       bl.addAll(bitsForHashMap(hm));
+      if(OUTPUTWORDS)
+        System.out.println(i + "\t" + bl.size());
       bOut.addAll(bl);
       int loc = longIdx << 6;
       loc += offset;
@@ -278,8 +348,7 @@ public class SBTSequenceModelRunner {
     
   }
   
-  public void incrementNextState(double weight, int state, double [] nextPState, double [] nextPStateCt) {
-    TIntDoubleHashMap hm = this._stateToState[state];
+  public static void incrementNextState(double weight, double [] nextPState, double [] nextPStateCt, TIntDoubleHashMap hm) {
     if(hm==null)
       return;
     TIntDoubleIterator it = hm.iterator();
@@ -400,8 +469,7 @@ public class SBTSequenceModelRunner {
   }
   
   //TODO: remove redundancy with trans
-  public void fillStartState(double [] nextPState, double [] nextPStateCt) {
-    TIntDoubleHashMap hm = _startState;
+  public static void fillStartState(double [] nextPState, double [] nextPStateCt, TIntDoubleHashMap hm) {
     TIntDoubleIterator it = hm.iterator(); 
     while(it.hasNext()) {
       it.advance();
@@ -431,12 +499,12 @@ public class SBTSequenceModelRunner {
         int word = ws.get(w);
         //compute next state dist:
         if(w==0) {
-          runner[mod].fillStartState(nextPState[mod], nextPStateCt[mod]);
+          fillStartState(nextPState[mod], nextPStateCt[mod], runner[mod]._startState);
         }
         else
           for(int i=0; i<numStates[mod];i++) {
             if(pState[mod][i] > 0.0) {
-              runner[mod].incrementNextState(pState[mod][i], i, nextPState[mod], nextPStateCt[mod]);
+              incrementNextState(pState[mod][i], nextPState[mod], nextPStateCt[mod], runner[mod]._stateToState[i]);
             }
           }
         SparseBackoffTree sbtNext = new SparseBackoffTree(runner[mod]._struct);
@@ -471,12 +539,12 @@ public class SBTSequenceModelRunner {
       int word = ws.get(w);
       //compute next state dist:
       if(w==0) {
-        fillStartState(nextPState, nextPStateCt);
+        fillStartState(nextPState, nextPStateCt, _startState);
       }
       else
         for(int i=0; i<numStates;i++) {
           if(pState[i] > 0.0) {
-            incrementNextState(pState[i], i, nextPState, nextPStateCt);
+            incrementNextState(pState[i], nextPState, nextPStateCt, _stateToState[i]);
           }
         }
       SparseBackoffTree sbtNext = new SparseBackoffTree(_struct);
@@ -503,12 +571,27 @@ public class SBTSequenceModelRunner {
   
 	public static void main(String[] args) throws Exception {
 	  //testWordEncoding();
-	  testEnsemble("e:\\data\\10m\\ens_adv", "e:\\data\\10m\\test.dat", 3080);
-//	  testSingleModel("e:\\data\\10m\\50down\\10m.model.6", "e:\\data\\ptb\\penn_test.dat");
-//	  testSingleModel("e:\\data\\10m\\10m-ext.model", "e:\\data\\10m\\test.dat", 3080);
-	  //4 - 138.7
-	  //5 - 139.4
-	  //6 - 142.9
+//	  testEnsemble("e:\\data\\10m\\ens_adv", "e:\\data\\10m\\test.dat", 3080);
+	  testSingleModel("e:\\data\\ptb\\emexp\\ptb.model", "e:\\data\\ptb\\penn_test.dat", 3761);
+//	   testSingleModel("e:\\data\\10m\\10m.model.3", "e:\\data\\10m\\test.dat", 3080);
+	   
+	  //6 3 fixed 0.9, incremental 200+200 iters: 342.8
+	  //6 3 fixed 0.9, 200 iters: 345.6
+	  //18 fixed 0.9, 200 iters: 349.5
+	  
+	  //model.0: 356 with adapted smooth
+	  //model.1: 206 with adapted smooth
+	  //model.2: 168 with adapted smooth
+	  //model.0: 366 with 0.9 smooth
+	  //model.1: 213 with 0.9 smooth
+	  //model.2: 174 with 0.9 smooth
+	  
+	  //model.0: 353 with 0.9 smooth and 0.99 every 5(?) iters decay
+	  //model.1: 
+	  
+	  //no translation table:
+//	  testSingleModel("e:\\data\\10m\\ens_adv\\8down.7", "e:\\data\\10m\\test.dat", 3080);
+//5028532 train after 526 for 15 10 with 0.99 every 5
 	  
 	  //with 8down.5 = 120.3
 	  //with 8down.6 = 119.2
