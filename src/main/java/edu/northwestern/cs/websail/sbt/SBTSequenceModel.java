@@ -209,7 +209,8 @@ public class SBTSequenceModel implements Serializable {
 	//testing config:
 	protected int _NUMPARTICLES = -1;
 	private int _MAXTESTDOCSIZE = -1;
-	private final boolean GIBBS = false;
+	private final boolean GIBBS = true;
+	private final boolean DROPOUT = false;
 	
 	private int _numSkipWords = 0;
 	
@@ -339,20 +340,46 @@ public class SBTSequenceModel implements Serializable {
 		this._OPTIMIZEINTERVAL = _OPTIMIZEINTERVAL;
 	}
 	
+	//returns offset
+	private int setThreadBreaks(int numPartitions, int partition) {
+	  
+	  _THREADBREAKS = new int[_NUMTHREADS];
+    long approxToks = _c._NUMTOKENS / (_NUMTHREADS * numPartitions);
+    long skipToks = partition * approxToks * _NUMTHREADS;
+    long ct = 0;
+    int thread = 0;
+    int j=0;
+    while(ct < skipToks)
+      ct += _c._docs[j++].size();
+    ct = 0;
+    for(int i=j; (i<_c._NUMDOCS)&&thread<_NUMTHREADS; i++ ) {
+      ct += _c._docs[i].size();
+      if(ct > approxToks) {
+        _THREADBREAKS[thread++] = i;
+        ct = 0;
+      }
+    }
+    //double-check that extra goes in last thread:
+    if(partition ==numPartitions - 1)
+      _THREADBREAKS[_NUMTHREADS - 1] = _c._NUMDOCS - 1;
+    return j;
+	}
+	
 	private void setThreadBreaks() {
-		_THREADBREAKS = new int[_NUMTHREADS];
-		long approxToks = _c._NUMTOKENS / _NUMTHREADS;
-		long ct = 0;
-		int thread = 0;
-		for(int i=0; i<_c._NUMDOCS; i++ ) {
-			ct += _c._docs[i].size();
-			if(ct > approxToks) {
-				_THREADBREAKS[thread++] = i;
-				ct = 0;
-			}
-		}
-		//extra goes in last thread:
-		_THREADBREAKS[_NUMTHREADS - 1] = _c._NUMDOCS - 1;
+	  setThreadBreaks(1, 0);
+//		_THREADBREAKS = new int[_NUMTHREADS];
+//		long approxToks = _c._NUMTOKENS / _NUMTHREADS;
+//		long ct = 0;
+//		int thread = 0;
+//		for(int i=0; i<_c._NUMDOCS; i++ ) {
+//			ct += _c._docs[i].size();
+//			if(ct > approxToks) {
+//				_THREADBREAKS[thread++] = i;
+//				ct = 0;
+//			}
+//		}
+//		//extra goes in last thread:
+//		_THREADBREAKS[_NUMTHREADS - 1] = _c._NUMDOCS - 1;
 	}
 
 	public int [] defaultExpansion(int numLevels) {
@@ -633,6 +660,11 @@ public class SBTSequenceModel implements Serializable {
 	      SparseBackoffTree sbtWord = this._wordToState[word];
 //	      SparseBackoffTreeIntersection sbti = new SparseBackoffTreeIntersection(new SparseBackoffTree [] {sbtNext, sbtWord});
 	      pState = Arrays.copyOf(nextPState, pState.length);
+	      if(DROPOUT)
+	        for(int i=0; i<pState.length;i++) {
+	          if(_r.nextDouble() < 0.1)
+	            pState[i] = 0.0;
+	        }
 	      SBTSequenceModelRunner.normalize(pState);
 	      double likelihood = 0.0;
 	      double [] pWord = sbtWord.toDoubleArray();
@@ -868,7 +900,8 @@ public class SBTSequenceModel implements Serializable {
     }
 	
 
-	public void initZ(TIntArrayList [] ds, int maxVal, boolean random, boolean scratch) {
+    //if scratch, copies z into scratch
+	public void initZ(TIntArrayList [] ds, int maxVal, boolean scratch) {
 		TIntArrayList [] zs;
 		if(scratch) {
 			_c._scratchZ = new TIntArrayList[ds.length];
@@ -881,7 +914,7 @@ public class SBTSequenceModel implements Serializable {
 		for(int i=0; i<ds.length; i++) {
 			zs[i] = new TIntArrayList(ds[i].size());
 			for(int j=0; j<ds[i].size(); j++)
-				zs[i].add(random ? _r.nextInt(maxVal) : 0); //don't use zero, reserved for start/end
+				zs[i].add((!scratch) ? _r.nextInt(maxVal) : _c._z[i].get(j));
 		}
 	}
 
@@ -1085,19 +1118,23 @@ public class SBTSequenceModel implements Serializable {
 	public int initializeForCorpus(String inFile, int maxVal) throws Exception {
 		int toks = _c.readCorpusDat(inFile, true);
 		setThreadBreaks();
-		initZ(_c._docs, maxVal, true, false);
+		initZ(_c._docs, maxVal, false);
 		updateModel(_c._z);
 		return toks;
 	}
 	
-    private int gibbsPass() { 
+	private int gibbsPass() {
+	  return gibbsPass(0);
+	}
+	
+    private int gibbsPass(int offset) { 
     	int changes= 0 ;
 	    GibbsDoer [] gds = new GibbsDoer[_NUMTHREADS];
 	    long stTime = System.currentTimeMillis();
     		ExecutorService e = Executors.newFixedThreadPool(_NUMTHREADS);
     		for(int i=0; i<_NUMTHREADS;i++) {
     			gds[i] = new GibbsDoer();
-    			gds[i]._start = 0;
+    			gds[i]._start = offset;
     			if(i > 0)
     				gds[i]._start = _THREADBREAKS[i-1] + 1;
     			gds[i]._end = _THREADBREAKS[i];
@@ -1541,18 +1578,11 @@ public class SBTSequenceModel implements Serializable {
     	  int curLeaves = _struct.numLeaves(); 
     	  if(!GIBBS) {
     	    System.out.println("executing special expansion gibbs for EM");
-    	    initZ(_c._docs, curLeaves, false, true); //init scratch array to zero
-          gibbsPass();
-          _c._z = _c._scratchZ;
-          initZ(_c._docs, curLeaves, false, true); //init scratch array to zero
-          gibbsPass();
-          _c._z = _c._scratchZ;
-          initZ(_c._docs, curLeaves, false, true); //init scratch array to zero
-          gibbsPass();
-          _c._z = _c._scratchZ;
-          initZ(_c._docs, curLeaves, false, true); //init scratch array to zero
-          gibbsPass();
-          _c._z = _c._scratchZ;
+    	    for(int i=0; i<0; i++) {
+      	    initZ(_c._docs, curLeaves, true); //init scratch array to zs
+            gibbsPass();
+            _c._z = _c._scratchZ;
+    	    }
     	  }
     		//get new structure
     		_branchingFactors = Arrays.copyOf(this._expansionBranchFactors, _EXPANSIONSCHEDULE[expansionIndex] + 1);
@@ -1624,12 +1654,18 @@ public class SBTSequenceModel implements Serializable {
 		if(expandOnEntry) {
       done = !expandModel(j);
 		}
+		boolean PARTIALPASS = true;
 		while(!done) {
 			for(int i=1; i<=iterations; i++) {
 				System.out.print(i + ": ");
+				int offset = 0;
+				if(PARTIALPASS) {
+				  offset = setThreadBreaks(10, (i-1) % 10);
+				  System.out.println(offset + "\t" + Arrays.toString(_THREADBREAKS));
+				}
 				if(GIBBS) {
-  				initZ(_c._docs, maxVal, false, true); //init scratch array to zero
-  				gibbsPass();
+  				initZ(_c._docs, maxVal, true); //init scratch array to zs
+  				gibbsPass(offset);
           if((i % updateInterval)==0) { 
             optimizeParameters(_c._scratchZ);
 //            if(j==0)
@@ -1643,9 +1679,9 @@ public class SBTSequenceModel implements Serializable {
 				  emPass();
 				  if((i % updateInterval)==0) { 
 				    for(int k=0; k<this._forwardDelta.length;k++) {
-				      _forwardDelta[k] *= 0.97;
-				      _backwardDelta[k] *= 0.97;
-				      _wordDelta[k] *= 0.98;
+				      _forwardDelta[k] *= 0.995;
+				      _backwardDelta[k] *= 0.995;
+				      _wordDelta[k] *= 0.995;
 				    }
 				  }
 				  updateModelFromEM();

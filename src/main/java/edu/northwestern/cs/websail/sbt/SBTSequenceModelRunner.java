@@ -385,8 +385,9 @@ public class SBTSequenceModelRunner {
     double sum = 0.0;
     for(int i=0; i<d.length;i++)
       sum += d[i];
-    for(int i=0; i<d.length;i++)
-      d[i] /= sum;
+    if(sum > 0.0)
+      for(int i=0; i<d.length;i++)
+        d[i] /= sum;
   }
   
   public static double [] testEnsemble(String modelDir, String testFile, int maxDocs) throws Exception {
@@ -572,35 +573,54 @@ public class SBTSequenceModelRunner {
 	public static void main(String[] args) throws Exception {
 	  //testWordEncoding();
 //	  testEnsemble("e:\\data\\10m\\ens_adv", "e:\\data\\10m\\test.dat", 3080);
-	  testSingleModel("e:\\data\\ptb\\emexp\\ptb.model", "e:\\data\\ptb\\penn_test.dat", 3761);
-//	   testSingleModel("e:\\data\\10m\\10m.model.3", "e:\\data\\10m\\test.dat", 3080);
+//	  testSingleModel("e:\\data\\ptb\\gibbslarge\\ptb.model", "e:\\data\\ptb\\penn_test.dat", 3761);
+//	    testSingleModel("e:\\data\\10m\\gibbslarge2\\10m.model.6", "e:\\data\\10m\\test.dat", 3080);
+	   testEnsemble("e:\\data\\10m\\gibbens", "e:\\data\\10m\\test.dat", 3080);
+	   //2000 full passes:
+	   //18: 538
+	   //18 5: 350
+	   //18 5 3: 270
+	   //18 5 3 3: 220
 	   
-	  //6 3 fixed 0.9, incremental 200+200 iters: 342.8
-	  //6 3 fixed 0.9, 200 iters: 345.6
-	  //18 fixed 0.9, 200 iters: 349.5
-	  
-	  //model.0: 356 with adapted smooth
-	  //model.1: 206 with adapted smooth
-	  //model.2: 168 with adapted smooth
-	  //model.0: 366 with 0.9 smooth
-	  //model.1: 213 with 0.9 smooth
-	  //model.2: 174 with 0.9 smooth
-	  
-	  //model.0: 353 with 0.9 smooth and 0.99 every 5(?) iters decay
-	  //model.1: 
-	  
+	   //2000 1/4 passes:
+	  //18: 532
+	   //18 5: 352
+	   //18 5 3: 273
+	   //18 5 3 3: 223
+	   //18 5 3 3 3: 187
+	   
+	   //3000 1/10 passes:
+	   //18: 551
+	   //18 5: 357
+	   //18 5 3: 275
+	   //18 5 3 3: 220
+	   //18 5 3 3 3: 185
+     //18 5 3 3 3 3: 167
+     //18 5 3 3 3 3 3: 159
+
+     //3000 1/10 passes (3):
+     //18: 540
+     //18 5: 348
+     //18 5 3: 272
+     //18 5 3 3: 219 
+     //18 5 3 3 3: 185
+     //18 5 3 3 3 3: 167
+     //18 5 3 3 3 3 3: 158
+
+     //3000 1/10 passes (2):
+     //18: 572
+     //18 5: 356
+     //18 5 3: 270
+     //18 5 3 3: 220 
+     //18 5 3 3 3: 186
+     //18 5 3 3 3 3: 168
+     //18 5 3 3 3 3 3: 159
+     
+	   
 	  //no translation table:
 //	  testSingleModel("e:\\data\\10m\\ens_adv\\8down.7", "e:\\data\\10m\\test.dat", 3080);
 //5028532 train after 526 for 15 10 with 0.99 every 5
 	  
-	  //with 8down.5 = 120.3
-	  //with 8down.6 = 119.2
-	  //with 20_7.5 -> 20_7.6 = 119.1
-	  //with 20down.5 -> 20down.6 = 119.4
-	  
-	  //9down.6 = 140.1
-	  //9down.5 = 139.3
-	  //9down.4 = 141.9
 //	  getEnsembleParams("e:\\data\\ptb\\ens_cheery\\");
 	  //testBerkSize("x:\\data\\10m\\trigramModelAll");
 	}
