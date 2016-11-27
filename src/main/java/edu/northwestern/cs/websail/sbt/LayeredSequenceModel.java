@@ -17,6 +17,7 @@ import java.io.InputStreamReader;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.OutputStreamWriter;
+import java.io.Serializable;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -28,10 +29,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-public class LayeredSequenceModel {
+public class LayeredSequenceModel implements Serializable {
 
   private static final long serialVersionUID = 2L;
-
   
   
   private class GibbsDoer implements Runnable {
@@ -46,16 +46,14 @@ public class LayeredSequenceModel {
 
     private class TestDoer implements Runnable {
       int _doc;
-      double [] _wordTopicMarginal;
       double [] _res;
       
-      public TestDoer(int i, double [] wordTopicMarginal) {
+      public TestDoer(int i) {
         _doc = i;
-        _wordTopicMarginal = wordTopicMarginal;
       }
       
       public void run() {
-        _res = testOnDocFullPpl(_doc, _wordTopicMarginal);
+        _res = testOnDocFullPpl(_doc);
         //_res = testOnDocFullPplExact(_doc, _wordTopicMarginal);
         System.out.println(_doc + "\t" + _res[0] + "\t" + _res[1]);
       }
@@ -71,20 +69,18 @@ public class LayeredSequenceModel {
   boolean [] _productionTemplate = new boolean[] {false, true}; //dims: MUST BE _NUMLAYERS
   //assumed internal links are always from layer i to layer i+1
   
-  SparseBackoffTree [][][] _forward; //dims: LAYERi x LAYERi-1 x state
+  SparseBackoffTree [][][] _forward; //dims: LAYERi-1 x LAYERi x state
   SparseBackoffTree []  _startState; //dims: LAYER
-  SparseBackoffTree [] _endState; //dims: LAYER
-  SparseBackoffTree [][][] _backward; //dims: LAYERi x LAYERi+1 x state
+  SparseBackoffTree [][][] _backward; //dims: LAYERi+1 x LAYERi x state
   SparseBackoffTree [][] _wordToState; //dims: LAYER x state
-  SparseBackoffTree [] _down; //dims: LAYER-1
-  SparseBackoffTree [] _up; //dims: LAYER-1
+  SparseBackoffTree [][] _down; //dims: LAYER-1 x state
+  SparseBackoffTree [][] _up; //dims: LAYER-1 x state
   
   
   double [][] _wordStateMarginal; //dims: LAYER x state
   double [][] _startStateMarginal; //dims: LAYER x state
-  double [][] _endStateMarginal; //dims: LAYER x state
-  double [][][] _backwardStateMarginal; //dims: LAYERi x LAYERi+1 x state
-  double [][][] _forwardStateMarginal; //dims: LAYERi x LAYERi-1 x state
+  double [][][] _backwardStateMarginal; //dims: LAYERi+1 x LAYERi x state
+  double [][][] _forwardStateMarginal; //dims: LAYERi-1 x LAYERi x state
   double [][] _upStateMarginal; //dims: LAYER x state
   double [][] _downStateMarginal; //dims: LAYER x state
   
@@ -143,11 +139,15 @@ public class LayeredSequenceModel {
     _forwardDelta = new double[_NUMLAYERS][_branchingFactors.length];
     _backwardDelta = new double[_NUMLAYERS][_branchingFactors.length];
     _wordDelta =new double[_NUMLAYERS][_branchingFactors.length];
+    _upDelta =new double[_NUMLAYERS][_branchingFactors.length];
+    _downDelta =new double[_NUMLAYERS][_branchingFactors.length];
     double initDelta = 0.9 / (double)_branchingFactors.length;
     for(int i=0; i<_NUMLAYERS; i++) {
-      Arrays.fill(_wordDelta, initDelta);
-      Arrays.fill(_forwardDelta, initDelta);
-      Arrays.fill(_backwardDelta, initDelta);
+      Arrays.fill(_wordDelta[i], initDelta);
+      Arrays.fill(_forwardDelta[i], initDelta);
+      Arrays.fill(_backwardDelta[i], initDelta);
+      Arrays.fill(_upDelta[i], initDelta);
+      Arrays.fill(_downDelta[i], initDelta);
     }
   }
   
@@ -374,7 +374,7 @@ public class LayeredSequenceModel {
           scratchZs[layer].set(i, zs[layer].get(i));
           continue;       
         }
-        int newZ = sampleZ(docId, layer, i, false);
+        int newZ = sampleZ(docId, layer, i, true, true, true, true);
         chg = _c.lambda * chg;
         if(newZ != zs[layer].get(i)) {
           changes++;
@@ -393,7 +393,7 @@ public class LayeredSequenceModel {
   }
   
   //Returns the SBTs and amounts to subtract for the given latent variable
-  public MarkovBlanketContainer getMarkovBlanket(int doc, int layer, int pos, boolean testing) {
+  public MarkovBlanketContainer getMarkovBlanket(int doc, int layer, int pos, boolean useNext, boolean useLayer, boolean useWord, boolean sub) {
     int w = _c._docs[doc].get(pos);
     int curZ = _c._z[doc][layer].get(pos);
     ArrayList<SparseBackoffTree> sbts = new ArrayList<>();
@@ -401,67 +401,75 @@ public class LayeredSequenceModel {
     //forward:
     if(pos==0) {
       sbts.add(this._startState[layer]);
-      doubs.add(this._startStateMarginal[layer][curZ]);
+      if(sub)
+        doubs.add(this._startStateMarginal[layer][curZ]);
     }
     else {
       for(int i=0; i<_NUMLAYERS; i++) {
         if(this._transitionTemplate[i][layer]) {
           SparseBackoffTree sbt = this._forward[layer][i][_c._z[doc][i].get(pos-1)];
           sbts.add(sbt);
-          doubs.add(this._forwardStateMarginal[layer][i][curZ]);
+          if(sub)
+            doubs.add(this._forwardStateMarginal[layer][i][curZ]);
         }
       }
     }
     //backward:
-    if(!testing) {
-      if(pos==_c._docs[doc].size() - 1) {
-        sbts.add(this._endState[layer]);
-        doubs.add(this._endStateMarginal[layer][curZ]);
-      }
-      else {
+    if(useNext) {
+      if(pos!=_c._docs[doc].size() - 1) {
         for(int i=0; i<_NUMLAYERS; i++) {
           if(this._transitionTemplate[layer][i]) {
             SparseBackoffTree sbt = this._backward[layer][i][_c._z[doc][i].get(pos+1)];
             sbts.add(sbt);
-            doubs.add(this._backwardStateMarginal[layer][i][curZ]);
+            if(sub)
+              doubs.add(this._backwardStateMarginal[layer][i][curZ]);
           }
         }
       }
+    }
+    if(useWord) {
       //word:
       if(_productionTemplate[layer]) {
         SparseBackoffTree sbtWord =this._wordToState[layer][w]; 
         if(sbtWord._totalMass > 0.0) {
           sbts.add(this._wordToState[layer][w]);
-          doubs.add(this._endStateMarginal[layer][curZ]);
+          if(sub)
+            doubs.add(this._wordStateMarginal[layer][curZ]);
         }
       }
     }
-    //layers:
-    if(!testing && layer!=_NUMLAYERS-1) {
-      sbts.add(this._up[_c._z[doc][layer+1].get(pos)]);
-      doubs.add(this._upStateMarginal[layer][curZ]);
-    }
-    if(layer!=0) {
-      sbts.add(this._down[_c._z[doc][layer-1].get(pos)]);
-      doubs.add(this._downStateMarginal[layer][curZ]);
+    if(useLayer) {
+      //layers:
+      if(useNext && layer!=_NUMLAYERS-1) {
+        sbts.add(this._up[layer+1][_c._z[doc][layer+1].get(pos)]);
+        if(sub)
+          doubs.add(this._upStateMarginal[layer+1][curZ]);
+      }
+      if(layer!=0) {
+        sbts.add(this._down[layer-1][_c._z[doc][layer-1].get(pos)]);
+        if(sub)
+          doubs.add(this._downStateMarginal[layer-1][curZ]);
+      }
     }
     
     MarkovBlanketContainer out = new MarkovBlanketContainer();
-    out.sbts = (SparseBackoffTree []) sbts.toArray();
+    out.sbts = new SparseBackoffTree[sbts.size()];
     out.subs = new double[sbts.size()];
     for(int i=0; i<sbts.size(); i++) {
       out.subs[i] = doubs.get(i);
+      if(sub)
+        out.sbts[i] = sbts.get(i);
     }
     return out;
   }
   
   
-  public int sampleZ(int doc, int layer, int pos, boolean testing) {
-    MarkovBlanketContainer mbc = getMarkovBlanket(doc, layer, pos, testing);
+  public int sampleZ(int doc, int layer, int pos, boolean useNext, boolean useLayer, boolean useWord, boolean sub) {
+    MarkovBlanketContainer mbc = getMarkovBlanket(doc, layer, pos, useNext, useLayer, useWord, sub);
     SparseBackoffTreeIntersection sbti;
-    int curZ = _c._z[layer][doc].get(pos);
+    int curZ = _c._z[doc][layer].get(pos);
 
-    if(!testing)
+    if(useNext && useWord && useLayer) //proxy for "at training time"
       sbti = new SparseBackoffTreeIntersection(mbc.sbts, curZ, mbc.subs, true);
     else
       sbti = new SparseBackoffTreeIntersection(mbc.sbts, true);
@@ -481,7 +489,7 @@ public class LayeredSequenceModel {
   }
   
   //if scratch, copies z into scratch
-  public void initZ(TIntArrayList [] ds, int maxVal, boolean scratch) {
+  public void initZ(TIntArrayList [] ds, int [] maxVal, boolean scratch) {
     TIntArrayList [][] zs;
     if(scratch) {
       _c._scratchZ = new TIntArrayList[ds.length][_NUMLAYERS];
@@ -495,7 +503,7 @@ public class LayeredSequenceModel {
       for(int j=0; j<_NUMLAYERS;j++) {
         zs[i][j] = new TIntArrayList(ds[i].size());
         for(int k=0; k<ds[i].size(); k++)
-          zs[i][j].add((!scratch) ? _r.nextInt(maxVal) : _c._z[i][j].get(k));
+          zs[i][j].add((!scratch) ? _r.nextInt(maxVal[j]) : _c._z[i][j].get(k));
       }
     }
   }
@@ -503,8 +511,8 @@ public class LayeredSequenceModel {
   private static class AggregatedCounts {
     TIntDoubleHashMap [][][] forward; //LAYERi-1 x LAYERi x NUMSTATES
     TIntDoubleHashMap [][][] backward; //LAYERi+1 x LAYERi x NUMSTATES
-    TIntDoubleHashMap [][] up; //LAYER x NUMSTATES
-    TIntDoubleHashMap [][] down; //LAYER x NUMSTATES
+    TIntDoubleHashMap [][] up; //LAYER x NUMSTATES...[i][] is counts *from* layer i
+    TIntDoubleHashMap [][] down; //LAYER x NUMSTATES...[i][] is counts *from* layer i
     TIntDoubleHashMap [] start; //LAYER
     TIntDoubleHashMap [] end; //LAYER
     TIntDoubleHashMap [][] word; //LAYER x VOCAB
@@ -524,8 +532,10 @@ public class LayeredSequenceModel {
     //init:
     for(int i=0; i<_NUMLAYERS; i++) {
       if(i!=_NUMLAYERS-1) {
-        ac.up[i] = new TIntDoubleHashMap[this._struct[i].numLeaves()];
         ac.down[i] = new TIntDoubleHashMap[this._struct[i].numLeaves()];
+      }
+      if(i > 0) {
+        ac.up[i] = new TIntDoubleHashMap[this._struct[i].numLeaves()];
       }
       for(int j=0; j<_NUMLAYERS; j++) {
         ac.forward[i][j] = new TIntDoubleHashMap[this._struct[i].numLeaves()];
@@ -553,7 +563,7 @@ public class LayeredSequenceModel {
       //transitions, layers, words:
       for(int i=0; i<w.size(); i++) {
         int word = w.get(i);
-        if(i < w.size()) {
+        if(i < w.size() - 1) {
           for(int j=0; j<_NUMLAYERS; j++) {
             for(int k=0; k<_NUMLAYERS; k++) {
               if(this._transitionTemplate[j][k]) {
@@ -568,7 +578,7 @@ public class LayeredSequenceModel {
             createAdjPut(ac.up[j], z[j].get(i), z[j-1].get(i), 1.0);
           }
           if(j < _NUMLAYERS - 1) {
-            createAdjPut(ac.down[j+1], z[j].get(i), z[j+1].get(i), 1.0);
+            createAdjPut(ac.down[j], z[j].get(i), z[j+1].get(i), 1.0);
           }
           if(this._productionTemplate[j]) {
             createAdjPut(ac.word[j], z[j].get(i), word, 1.0);
@@ -576,179 +586,38 @@ public class LayeredSequenceModel {
         }
       }
       //end:
-      
+      for(int i=0; i<_NUMLAYERS; i++) {
+        createAdjPut(ac.end, i, z[i].get(w.size()-1), 1.0);
+      }
     }
     return ac;
   }
   
-  /**
-   * Returns a an array of sparse hash maps, one for each X, saying how many times the X maps to each state.
-   * if from = -2 then X = start of sentence
-   * if from = -1 then X = previous state (get state-to-next-state counts)
-   * if from = 0 then X = words (get word-to-state counts)
-   * if from = 1 then X = next state (get state-to-previous-state counts)
-   * if from = 2 then X = end of sentence (after </s> marker if any)
-   * @param from  See above
-   * @return
-   */
-  public TIntDoubleHashMap [] aggregateCounts(int from, TIntArrayList [] zs, TIntArrayList [] ws) {
-    TIntDoubleHashMap [] hm;
-    
-    //handle start/end as special case
-    if(from==2 || from==-2) { 
-      hm = new TIntDoubleHashMap[1];
-      hm[0] = new TIntDoubleHashMap();
-      for(int i=0; i<zs.length; i++) {
-        if(from==-2) {
-          hm[0].adjustOrPutValue(zs[i].get(0), 1.0, 1.0);
-        }
-        else {
-          hm[0].adjustOrPutValue(zs[i].get(zs[i].size()-1), 1.0, 1.0);
-        }
-      }
-      return hm;
-    }
-    
-    if(from==0)
-      hm = new TIntDoubleHashMap[_c._VOCABSIZE];
-    else
-      hm = new TIntDoubleHashMap[_struct.numLeaves()];
-    
-    //forward steps from word j to j+1
-    //backward steps from j+1 to j
-    //word steps to j
-    for(int i=0; i<zs.length; i++) {
-      for(int j=0; j<zs[i].size(); j++) {
-        int xID = -1;
-        int z = -1;
-        if(j==zs[i].size()-1 && from !=0) //no transition here
-          continue;
-        if(from == -1) {
-          xID = zs[i].get(j);
-          z = zs[i].get(j+1);
-        }
-        else if(from == 1) {
-          xID = zs[i].get(j+1);
-          z = zs[i].get(j);
-        }
-        else {
-          xID = ws[i].get(j);
-          z = zs[i].get(j);
-        }
-        if(hm[xID] == null)
-          hm[xID] = new TIntDoubleHashMap();
-        hm[xID].adjustOrPutValue(z, 1.0, 1.0);
-      }
-    }
-    return hm;
-  }
   
-  /**
-   * Returns sbts with given discounts of given type based on current sampler state
-   * if from = -2 then returns start-state parameteres
-   * if from = -1 then returns forward parameters
-   * if from = 0 then returns word-to-state parameters
-   * if from = 1 then backward parameters
-   * if from = 2 then returns end-state parameters
-   * @param dsWords The discounts to use in the returned parameters
-   * @param from  see above
-   * @return
-   */
-  public SparseBackoffTree [] getParamsFromZs(double [] dsWords, int from, TIntArrayList [] zs,
-      TIntArrayList [] ws) {
-    //aggregate:
-    TIntDoubleHashMap [] hm = aggregateCounts(from, zs, ws);
+  public SparseBackoffTree [] getParamsFromHash(double [] ds, TIntDoubleHashMap [] hm, SparseBackoffTreeStructure struct) {
     SparseBackoffTree [] out = new SparseBackoffTree[hm.length];
     
     for(int i=0; i<hm.length; i++) {
-      out[i] = new SparseBackoffTree(_struct);
+      out[i] = new SparseBackoffTree(struct);
     }
     
     //add:
     for(int i=0; i<hm.length; i++) {
       if(hm[i] == null)
         continue;
-      TIntDoubleIterator it = hm[i].iterator();
-      while(it.hasNext()) {
-        it.advance();
-        int z = it.key();
-        double val = it.value();
-        out[i].smoothAndAddMass(z, val, dsWords);
-      }
-    }
-    return out;
-  }
-  
-  //TODO: remove redundancy with code directly above.
-  public SparseBackoffTree [] getParamsFromHash(double [] dsWords, int from, TIntDoubleHashMap [] hm) {
-    SparseBackoffTree [] out = new SparseBackoffTree[hm.length];
-    
-    for(int i=0; i<hm.length; i++) {
-      out[i] = new SparseBackoffTree(_struct);
-    }
-    
-    //add:
-    for(int i=0; i<hm.length; i++) {
-      if(hm[i] == null)
-        continue;
-      TIntDoubleIterator it = hm[i].iterator();
-      while(it.hasNext()) {
-        it.advance();
-        int z = it.key();
-        double val = it.value();
-        out[i].smoothAndAddMass(z, val, dsWords);
-      }
+      out[i] = getParamsFromHash(ds, hm[i], struct);
     }
     return out;   
   }
   
-  public TIntDoubleHashMap [] accToHash(int from) {
-    TIntDoubleHashMap [] out;
-    if(from==-2) { //start
-      out = new TIntDoubleHashMap[1];
-      out[0] = new TIntDoubleHashMap();
-      for(int i=0; i<this._startAcc.length;i++) {
-        out[0].put(i, _startAcc[i]);
-      }
-    }
-    else if(from ==-1) { //forward
-      out = new TIntDoubleHashMap[_forwardArrays.length];
-      for(int i=0; i<out.length;i++) {
-        out[i] = new TIntDoubleHashMap();
-      }
-      for(int j=0; j<this._transAcc.length;j++) {
-        for(int k=0; k<this._transAcc[j].length; k++) {
-            out[j].put(k, _transAcc[j][k]);
-        }
-      }
-    }
-
-    else if(from==0) { //word
-      out = new TIntDoubleHashMap[_wordAcc.length];
-      for(int i=0; i<out.length; i++) {
-        out[i] = new TIntDoubleHashMap();
-        for(int j=0; j<_wordAcc[i].length; j++) {
-          out[i].put(j, _wordAcc[i][j]);
-        }
-      }
-    }
-     else if(from==1) { //backward
-        out = new TIntDoubleHashMap[_backwardArrays.length];
-        for(int i=0; i<out.length;i++) {
-          out[i] = new TIntDoubleHashMap();
-        }
-        for(int j=0; j<this._transAcc.length;j++) {
-          for(int k=0; k<this._transAcc[j].length; k++) {
-              out[k].put(j, _transAcc[j][k]);
-          }
-        }
-      }
-     else { //end state
-      out = new TIntDoubleHashMap[1];
-      out[0] = new TIntDoubleHashMap();
-      for(int i=0; i<this._endAcc.length;i++) {
-        out[0].put(i, _endAcc[i]);
-      }
+  public SparseBackoffTree getParamsFromHash(double [] ds, TIntDoubleHashMap hm, SparseBackoffTreeStructure struct) {
+    SparseBackoffTree out = new SparseBackoffTree(struct);
+    TIntDoubleIterator it = hm.iterator();
+    while(it.hasNext()) {
+      it.advance();
+      int z = it.key();
+      double val = it.value();
+      out.smoothAndAddMass(z, val, ds);
     }
     return out;
   }
@@ -766,11 +635,6 @@ public class LayeredSequenceModel {
     return out;
   }
     
-  public SparseBackoffTree [] getParamsFromAccs(double [] ds, int from) {
-    TIntDoubleHashMap [] hm = accToHash(from);
-    return getParamsFromHash(ds, from, hm);
-  }
-  
   /**
    * reads the corpus and initializes zs and model
    * @param inFile
@@ -778,7 +642,7 @@ public class LayeredSequenceModel {
    * @return
    * @throws Exception
    */
-  public int initializeForCorpus(String inFile, int maxVal) throws Exception {
+  public int initializeForCorpus(String inFile, int [] maxVal) throws Exception {
     int toks = _c.readCorpusDat(inFile, true);
     setThreadBreaks();
     initZ(_c._docs, maxVal, false);
@@ -823,49 +687,6 @@ public class LayeredSequenceModel {
       return changes;
     }
   
-    //TODO: remove redundancy with gibbsPass
-    private double emPass() { 
-      double loglikelihood= 0 ;
-      EMDoer [] eds = new EMDoer[_NUMTHREADS];
-      long stTime = System.currentTimeMillis();
-      ExecutorService e = Executors.newFixedThreadPool(_NUMTHREADS);
-      int numStates = this._forwardArrays.length;
-      int numWords = this.get_VOCABSIZE();
-      _startAcc = new double [numStates];
-      _transAcc = new double[numStates][numStates];
-      _endAcc = new double[numStates];
-      _wordAcc = new double[numWords][numStates];
-      for(int i=0; i<_NUMTHREADS;i++) {
-        eds[i] = new EMDoer();
-        eds[i]._start = 0;
-        if(i > 0)
-          eds[i]._start = _THREADBREAKS[i-1] + 1;
-        eds[i]._end = _THREADBREAKS[i];
-        eds[i]._numStates = numStates;
-        eds[i]._numWords = numWords;
-        e.execute(eds[i]);
-      }
-      e.shutdown();
-      boolean terminated = false;
-      while(!terminated) {
-        try {
-          terminated = e.awaitTermination(60,  TimeUnit.SECONDS);
-        }
-        catch (InterruptedException ie) {
-          
-        }
-      }
-      for(int i=0; i<_NUMTHREADS; i++) {
-        loglikelihood += eds[i]._loglikelihood;
-        reduce(eds[i]);
-      }
-      stTime = System.currentTimeMillis() - stTime;
-      System.out.println("\ttime: " + stTime + "\tLL: " + loglikelihood + "\tskipWords: " + _numSkipWords);
-      //System.out.println("state marginal: " + Arrays.toString(this._wordStateMarginal));
-      _numSkipWords = 0;
-      //System.out.println(Arrays.toString(_topicMarginal));
-      return loglikelihood;
-    }    
     
   //returns array of amt_i
   //such that if we divide leaf counts by amt_i, we get smoothing with marginal P(z)
@@ -911,74 +732,92 @@ public class LayeredSequenceModel {
     return out;
   }
   
-  public void reduce(EMDoer ed) {
-    for(int i=0; i<_startAcc.length;i++) {
-      _startAcc[i] += ed._startAcc[i];
-      _endAcc[i] += ed._endAcc[i];
-    }
-    for(int i=0; i<_wordAcc.length;i++) {
-      for(int j=0; j<_wordAcc[i].length; j++) {
-        _wordAcc[i][j] += ed._wordAcc[i][j];
-      }
-    }
-    for(int i=0; i<_transAcc.length;i++) {
-      for(int j=0; j<_transAcc[i].length; j++) {
-        _transAcc[i][j] += ed._transAcc[i][j];
-      }
-    }   
+  private static double [] ones(int len) {
+    double [] out = new double[len];
+    Arrays.fill(out, 1.0);
+    return out;
   }
-  
-  public void updateModelFromEM() {
-    
-    System.out.println("arch: " + Arrays.toString(this._branchingFactors));
-    this._startState = getParamsFromAccs(_forwardDelta, -2)[0];
-    this._forward = getParamsFromAccs(_forwardDelta, -1);
-    this._backward = getParamsFromAccs(_backwardDelta, 1);
-    this._endState = getParamsFromAccs(_backwardDelta, 2)[0];
-    this._wordToState = getParamsFromAccs(_wordDelta, 0);
-    SparseBackoffTree [] comb = Arrays.copyOf(_backward, _backward.length + 1);
-    comb[_backward.length] = _endState;
-    this._backwardStateMarginal = getNormalizers(comb, _struct);
-    this._wordStateMarginal = getNormalizers(_wordToState, _struct);
-    for(int i=0; i<_backward.length; i++) {
-      _backward[i].divideCountsBy(_backwardStateMarginal);
-    }
-    this._endState.divideCountsBy(_backwardStateMarginal);
-    for(int i=0; i<_wordToState.length; i++) {
-      _wordToState[i].divideCountsBy(_wordStateMarginal); 
-    }
-    System.out.println("\tdiscounts forward: " + Arrays.toString(_forwardDelta) + 
-        "\tbackward " + Arrays.toString(_backwardDelta) +
-            "\tword " + Arrays.toString(_wordDelta));
-  }
+
   
   /**
    * Updates the model given the topic assignments (_z) and divides by marginal for next sampling pass
    */
-    public void updateModel(TIntArrayList [] zs) {
+    public void updateModel(TIntArrayList [][] zs) {
       System.out.println("arch: " + Arrays.toString(this._branchingFactors));
-    System.out.println("second doc samples: " + zs[1].toString());
-    if(_c._changeFactor != null)
-      System.out.println("second doc chg: " + _c._changeFactor[1].toString());
-    this._startState = getParamsFromZs(_forwardDelta, -2, zs, _c._docs)[0];
-    this._forward = getParamsFromZs(_forwardDelta, -1, zs, _c._docs);
-    this._backward = getParamsFromZs(_backwardDelta, 1, zs, _c._docs);
-    this._endState = getParamsFromZs(_backwardDelta, 2, zs, _c._docs)[0];
-    this._wordToState = getParamsFromZs(_wordDelta, 0, zs, _c._docs);
-    SparseBackoffTree [] comb = Arrays.copyOf(_backward, _backward.length + 1);
-    comb[_backward.length] = _endState;
-    this._backwardStateMarginal = getNormalizers(comb, _struct);
-    this._wordStateMarginal = getNormalizers(_wordToState, _struct);
-    for(int i=0; i<_backward.length; i++) {
-      _backward[i].divideCountsBy(_backwardStateMarginal);
-    }
-    this._endState.divideCountsBy(_backwardStateMarginal);
-    for(int i=0; i<_wordToState.length; i++) {
-      _wordToState[i].divideCountsBy(_wordStateMarginal); 
-    }
-    System.out.println("\tdiscounts forward: " + Arrays.toString(_forwardDelta) + 
-        "\tbackward " + Arrays.toString(_backwardDelta) +
-            "\tword " + Arrays.toString(_wordDelta));
+      System.out.println("second doc samples (layer 0): " + zs[1][0].toString());
+      if(_c._changeFactor != null)
+        System.out.println("second doc chg (layer 0): " + _c._changeFactor[1][0].toString());
+      AggregatedCounts ac = this.aggregateCounts(zs, _c._docs);
+      
+      this._startState  = new SparseBackoffTree[_NUMLAYERS];
+      this._wordToState  = new SparseBackoffTree[_NUMLAYERS][];
+      this._forward  = new SparseBackoffTree[_NUMLAYERS][_NUMLAYERS][];
+      this._backward = new SparseBackoffTree[_NUMLAYERS][_NUMLAYERS][];
+      this._up  = new SparseBackoffTree[_NUMLAYERS][];
+      this._down  = new SparseBackoffTree[_NUMLAYERS][];
+      this._startStateMarginal = new double[_NUMLAYERS][];
+      this._backwardStateMarginal = new double[_NUMLAYERS][_NUMLAYERS][];
+      this._forwardStateMarginal =  new double[_NUMLAYERS][_NUMLAYERS][];
+      this._downStateMarginal = new double[_NUMLAYERS][];
+      this._upStateMarginal = new double[_NUMLAYERS][];
+      this._wordStateMarginal = new double[_NUMLAYERS][];
+      
+      for(int i=0; i<_NUMLAYERS;i++) {
+        this._startState[i] = getParamsFromHash(_forwardDelta[i], ac.start[i], this._struct[i]);
+        for(int j=0; j<_NUMLAYERS;j++) {
+          this._forward[i][j] = getParamsFromHash(_forwardDelta[j], ac.forward[i][j], this._struct[j]);
+          this._backward[j][i] = getParamsFromHash(_backwardDelta[i], ac.backward[j][i], this._struct[i]);
+        }
+        this._wordToState[i] = getParamsFromHash(_wordDelta[i], ac.word[i], this._struct[i]);
+        if(i > 0)
+          this._down[i-1] = getParamsFromHash(_downDelta[i-1], ac.down[i-1], this._struct[i]);
+        if(i < _NUMLAYERS - 1)
+          this._up[i+1] = getParamsFromHash(_upDelta[i+1], ac.up[i+1], this._struct[i]);
+      }
+
+      for(int j=0; j<_NUMLAYERS;j++) {
+        this._startStateMarginal[j] = ones(_struct[j].numLeaves());
+        for(int k=0; k<_NUMLAYERS;k++) {
+          boolean first = true;
+          if(_transitionTemplate[j][k]) {
+            //first forward always has normalizers of 1.0:
+            if(first) {
+              first=false;
+              this._forwardStateMarginal[j][k] = ones(_struct[k].numLeaves());
+            }
+            else {
+              this._forwardStateMarginal[j][k] = getNormalizers(_forward[j][k], _struct[k]);
+            }
+            this._backwardStateMarginal[j][k] = getNormalizers(_backward[j][k], _struct[k]);
+            
+            for(int i=0; i<_backward[j][k].length; i++) {
+              _backward[j][k][i].divideCountsBy(_backwardStateMarginal[j][k]);
+              _forward[j][k][i].divideCountsBy(_forwardStateMarginal[j][k]);
+            }
+          }
+        }
+        if(j < _NUMLAYERS - 1) {
+          this._downStateMarginal[j] = getNormalizers(_down[j], _struct[j+1]);
+          for(int i=0; i<_down[j].length; i++) {
+            _down[j][i].divideCountsBy(_downStateMarginal[j]);
+          }
+        }
+        if(j > 0) {
+          this._upStateMarginal[j] = getNormalizers(_up[j], _struct[j-1]);
+          for(int i=0; i<_up[j].length; i++) {
+            _up[j][i].divideCountsBy(_upStateMarginal[j]);
+          }
+        }
+        if(this._productionTemplate[j]) {
+          this._wordStateMarginal[j] = getNormalizers(_wordToState[j], _struct[j]);
+          for(int i=0; i<_wordToState[j].length; i++) {
+            _wordToState[j][i].divideCountsBy(_wordStateMarginal[j]); 
+          }
+        }
+      }
+      System.out.println("\tdiscounts forward: " + Arrays.toString(_forwardDelta[0]) + 
+          "\tbackward " + Arrays.toString(_backwardDelta[0]) +
+              "\tword " + Arrays.toString(_wordDelta[0]));
     }
     
     /**
@@ -991,8 +830,9 @@ public class LayeredSequenceModel {
      * otherwise, use leave-one-out cross validation
      * @return  log likelihood using current parameters
      */
-    public double updateGradient(double [] grad, TIntDoubleHashMap hm, double [] curDeltas, boolean incremental) {
-      SparseBackoffTree sbt = new SparseBackoffTree(_struct);
+    public double updateGradient(double [] grad, TIntDoubleHashMap hm, double [] curDeltas, boolean incremental,
+        SparseBackoffTreeStructure struct) {
+      SparseBackoffTree sbt = new SparseBackoffTree(struct);
       double [] leafCount = new double[curDeltas.length];
       leafCount[leafCount.length - 1] = _branchingFactors[leafCount.length - 1];
       for(int i=leafCount.length - 2; i>=0;i--) {
@@ -1037,7 +877,7 @@ public class LayeredSequenceModel {
           double v = it.value();          
 
           //TODO: optimize around these expensive steps:
-          int [] localIdxTrace = _struct.getLocalIdxTrace(z);
+          int [] localIdxTrace = struct.getLocalIdxTrace(z);
           double [] smooths = sbt.getSmoothsTrace(localIdxTrace);
           
           double smoothed = sbt.getSmoothed(z);
@@ -1066,7 +906,7 @@ public class LayeredSequenceModel {
           int z = it.next();          
 
           //TODO: optimize around these expensive steps:
-          int [] localIdxTrace = _struct.getLocalIdxTrace(z);
+          int [] localIdxTrace = struct.getLocalIdxTrace(z);
           double [] smooths = sbt.getSmoothsTrace(localIdxTrace);
           
           double [] countSmoothed = sbt.getSmoothAndCount(z);
@@ -1156,12 +996,13 @@ public class LayeredSequenceModel {
      * otherwise, use leave-one-out cross validation
      * @return
      */
-    public double [] gradientStep(double [] deltas, TIntDoubleHashMap [] hm, double stepSize, boolean incremental) {
+    public double [] gradientStep(double [] deltas, TIntDoubleHashMap [] hm, double stepSize, boolean incremental,
+        SparseBackoffTreeStructure struct) {
       double [] gradient = new double[deltas.length];
       double LL = 0.0;
       for(int i=0; i<hm.length; i++) {
         if(hm[i] != null)
-          LL += updateGradient(gradient, hm[i], deltas, incremental);
+          LL += updateGradient(gradient, hm[i], deltas, incremental, struct);
       }
       System.out.println("LL: " + LL);
       System.out.println("got grad " + Arrays.toString(gradient));
@@ -1174,7 +1015,9 @@ public class LayeredSequenceModel {
     /**
      * Optimizes parameters using gradient ascent in log likelihood
      */
-    public void optimizeParameters(TIntArrayList [] zs) {
+    public void optimizeParameters(TIntArrayList [][] zs) {
+      //TODO: implement
+      return;
 //      for(int i=0; i<_wordsDelta.length; i++) {
 //        _wordsDelta[i] *= 0.9;
 //        _docsDelta[i] *= 0.9;
@@ -1183,52 +1026,52 @@ public class LayeredSequenceModel {
 //      double STEPSIZE = 0.01; //start stepping this far in L1 norm
 //      double STEPDEC = 0.95; //decrease step size this much each step
 //      int NUMSTEPS = 20; //number of steps to take
-      double STEPSIZE = 0.02; //start stepping this far in L1 norm
-      double STEPDEC = 0.8; //decrease step size this much each step
-      int NUMSTEPS = 10; //number of steps to take
-
-      TIntDoubleHashMap [] hm = aggregateCounts(0, zs, _c._docs);
-      System.out.println("words:");
-      double step = STEPSIZE;
-      for(int i=0; i<NUMSTEPS; i++) {
-          gradientStep(_wordDelta, hm, step, false);
-          step *= STEPDEC;
-      }
-      long totalparams = 0L;
-      for(TIntDoubleHashMap i : hm) {
-        if(i != null)
-          totalparams += i.size();
-      }
-      hm = aggregateCounts(-1, zs, _c._docs);
-      TIntDoubleHashMap [] hm2 = Arrays.copyOf(hm, hm.length + 1);
-      hm2[hm.length] = aggregateCounts(-2, zs, _c._docs)[0];
-      hm = hm2;
-      long transParams = 0L;
-      for(TIntDoubleHashMap i : hm) {
-        if(i != null)
-          transParams += i.size();
-      }
-      System.out.println("forward:");
-      step = STEPSIZE;
-      for(int i=0; i<NUMSTEPS; i++) {
-          gradientStep(_forwardDelta, hm, step, false);
-          step *= STEPDEC;
-      }
-      hm = aggregateCounts(1, zs, _c._docs);
-      hm2 = Arrays.copyOf(hm, hm.length + 1);
-      hm2[hm.length] = aggregateCounts(2, zs, _c._docs)[0];
-      hm = hm2;
-      System.out.println("backward:");
-      step = STEPSIZE;
-      for(int i=0; i<NUMSTEPS; i++) {
-          gradientStep(_backwardDelta, hm, step, false);
-          step *= STEPDEC;
-      }
-      System.out.println("full word deltas: " + Arrays.toString(_wordDelta));
-      System.out.println("full forward deltas: " + Arrays.toString(_forwardDelta));
-      System.out.println("full backward deltas: " + Arrays.toString(_backwardDelta));
-      System.out.println("total nonzero word-state params: " + totalparams);
-      System.out.println("total forward trans params: " + transParams);
+//      double STEPSIZE = 0.02; //start stepping this far in L1 norm
+//      double STEPDEC = 0.8; //decrease step size this much each step
+//      int NUMSTEPS = 10; //number of steps to take
+//
+//      TIntDoubleHashMap [] hm = aggregateCounts(0, zs, _c._docs);
+//      System.out.println("words:");
+//      double step = STEPSIZE;
+//      for(int i=0; i<NUMSTEPS; i++) {
+//          gradientStep(_wordDelta, hm, step, false);
+//          step *= STEPDEC;
+//      }
+//      long totalparams = 0L;
+//      for(TIntDoubleHashMap i : hm) {
+//        if(i != null)
+//          totalparams += i.size();
+//      }
+//      hm = aggregateCounts(-1, zs, _c._docs);
+//      TIntDoubleHashMap [] hm2 = Arrays.copyOf(hm, hm.length + 1);
+//      hm2[hm.length] = aggregateCounts(-2, zs, _c._docs)[0];
+//      hm = hm2;
+//      long transParams = 0L;
+//      for(TIntDoubleHashMap i : hm) {
+//        if(i != null)
+//          transParams += i.size();
+//      }
+//      System.out.println("forward:");
+//      step = STEPSIZE;
+//      for(int i=0; i<NUMSTEPS; i++) {
+//          gradientStep(_forwardDelta, hm, step, false);
+//          step *= STEPDEC;
+//      }
+//      hm = aggregateCounts(1, zs, _c._docs);
+//      hm2 = Arrays.copyOf(hm, hm.length + 1);
+//      hm2[hm.length] = aggregateCounts(2, zs, _c._docs)[0];
+//      hm = hm2;
+//      System.out.println("backward:");
+//      step = STEPSIZE;
+//      for(int i=0; i<NUMSTEPS; i++) {
+//          gradientStep(_backwardDelta, hm, step, false);
+//          step *= STEPDEC;
+//      }
+//      System.out.println("full word deltas: " + Arrays.toString(_wordDelta));
+//      System.out.println("full forward deltas: " + Arrays.toString(_forwardDelta));
+//      System.out.println("full backward deltas: " + Arrays.toString(_backwardDelta));
+//      System.out.println("total nonzero word-state params: " + totalparams);
+//      System.out.println("total forward trans params: " + transParams);
     }
     
     /**
@@ -1238,26 +1081,20 @@ public class LayeredSequenceModel {
      */
     public boolean expandModel(int expansionIndex) {
       if(expansionIndex < _EXPANSIONSCHEDULE.length) {
-        int curLeaves = _struct.numLeaves(); 
-        if(!GIBBS) {
-          System.out.println("executing special expansion gibbs for EM");
-          for(int i=0; i<0; i++) {
-            initZ(_c._docs, curLeaves, true); //init scratch array to zs
-            gibbsPass();
-            _c._z = _c._scratchZ;
-          }
-        }
-        //get new structure
-        _branchingFactors = Arrays.copyOf(this._expansionBranchFactors, _EXPANSIONSCHEDULE[expansionIndex] + 1);
-        _struct = new SparseBackoffTreeStructure(_branchingFactors);
-        initDeltas();
-        int multiplier = _struct.numLeaves()/curLeaves;
-        System.out.println("Expanding to " + Arrays.toString(_branchingFactors));
-        for(int i=0; i<_c._z.length;i++) {
-          for(int j=0; j<_c._z[i].size(); j++) {
-            int z = multiplier * _c._z[i].get(j) + _r.nextInt(multiplier);
-            _c._z[i].set(j,  z);
-            _c._changeFactor[i].set(j, 1.0);
+        for(int layer=0;layer<_NUMLAYERS;layer++) {
+          int curLeaves = _struct[layer].numLeaves(); 
+          //get new structure
+          _branchingFactors = Arrays.copyOf(this._expansionBranchFactors, _EXPANSIONSCHEDULE[expansionIndex] + 1);
+          _struct[layer] = new SparseBackoffTreeStructure(_branchingFactors);
+          initDeltas();
+          int multiplier = _struct[layer].numLeaves()/curLeaves;
+          System.out.println("Expanding to " + Arrays.toString(_branchingFactors));
+          for(int i=0; i<_c._z[layer].length;i++) {
+            for(int j=0; j<_c._z[layer][i].size(); j++) {
+              int z = multiplier * _c._z[layer][i].get(j) + _r.nextInt(multiplier);
+              _c._z[layer][i].set(j,  z);
+              _c._changeFactor[layer][i].set(j, 1.0);
+            }
           }
         }
         updateModel(_c._z);
@@ -1279,29 +1116,6 @@ public class LayeredSequenceModel {
       }
     }
     
-    public void renumberStatesForCompression(TIntArrayList [] zs) { //changes states in zs to make more frequent states have lower ids
-      TIntIntHashMap stateCount = new TIntIntHashMap();
-      TIntIntHashMap stateTranslation = new TIntIntHashMap();
-      for(int i=0; i<zs.length; i++) {
-        for(int j=0; j<zs[i].size(); j++)
-        stateCount.adjustOrPutValue(zs[i].get(j), 1, 1);
-      }
-      TreeMap<Double, Integer> sortedStates = new TreeMap<>(Collections.reverseOrder());
-      TIntIntIterator it = stateCount.iterator();
-      while(it.hasNext()) {
-        it.advance();
-        double freq = it.value();
-        while(sortedStates.containsKey(freq)) { //break ties arbitrarily
-          freq -= 0.0000001; //HACK (gross)
-        }
-        sortedStates.put(freq, it.key());
-      }
-      int ct = 0;
-      for(double d : sortedStates.keySet()) {
-        stateTranslation.put(sortedStates.get(d), ct++);
-      }
-      translateStates(zs, stateTranslation);
-    }
     
     /**
      * Trains the model for a specified number of iterations.
@@ -1313,7 +1127,10 @@ public class LayeredSequenceModel {
   public void trainModel(int iterations, int updateInterval, String outFile, boolean expandOnEntry) throws Exception {
     boolean done = false;
     int j=0;
-    int maxVal = _struct.numLeaves();
+    int [] maxVal = new int[_NUMLAYERS];
+    for(int i=0; i<_NUMLAYERS; i++) {
+      maxVal[i] = _struct[i].numLeaves();
+    }
     if(expandOnEntry) {
       done = !expandModel(j);
     }
@@ -1326,29 +1143,13 @@ public class LayeredSequenceModel {
           offset = setThreadBreaks(10, (i-1) % 10);
           System.out.println(offset + "\t" + Arrays.toString(_THREADBREAKS));
         }
-        if(GIBBS) {
-          initZ(_c._docs, maxVal, true); //init scratch array to zs
-          gibbsPass(offset);
-          if((i % updateInterval)==0) { 
-            optimizeParameters(_c._scratchZ);
-//            if(j==0)
-//              renumberStatesForCompression(_c._scratchZ);
-          }
-          updateModel(_c._scratchZ);
-          _c._z = _c._scratchZ;
+        initZ(_c._docs, maxVal, true); //init scratch array to zs
+        gibbsPass(offset);
+        if((i % updateInterval)==0) { 
+          optimizeParameters(_c._scratchZ);
         }
-        else {
-          this.initArraysFromSBTs();
-          emPass();
-          if((i % updateInterval)==0) { 
-            for(int k=0; k<this._forwardDelta.length;k++) {
-              _forwardDelta[k] *= 0.995;
-              _backwardDelta[k] *= 0.995;
-              _wordDelta[k] *= 0.995;
-            }
-          }
-          updateModelFromEM();
-        }
+        updateModel(_c._scratchZ);
+        _c._z = _c._scratchZ;
       }
       if(this._USEEXPANSION == 1) {
         writeModel(outFile + "." + j);
@@ -1361,18 +1162,20 @@ public class LayeredSequenceModel {
   }
   
   public void writeModel(String outFile) throws Exception {
-    SparseBackoffTree [] sbtW = this._wordToState;
-    SparseBackoffTree [] sbtF = this._forward;
-    SparseBackoffTree [] sbtB = this._backward;
-    SparseBackoffTree sbtS = this._startState;
-    SparseBackoffTree sbtE = this._endState;
-    SparseBackoffTreeStructure struct = this._struct;
+    SparseBackoffTree [][] sbtW = this._wordToState;
+    SparseBackoffTree [][][] sbtF = this._forward;
+    SparseBackoffTree [][][] sbtB = this._backward;
+    SparseBackoffTree [] sbtS = this._startState;
+    SparseBackoffTree [][] sbtU = this._up;
+    SparseBackoffTree [][] sbtD = this._down;
+    SparseBackoffTreeStructure [] struct = this._struct;
     _struct = null;
     _wordToState = null;
     _forward = null;
     _backward = null;
     _startState = null;
-    _endState = null;
+    _up = null;
+    _down = null;
     ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(outFile));
     oos.writeObject(this);
     oos.close();
@@ -1381,20 +1184,18 @@ public class LayeredSequenceModel {
     _backward = sbtB;
     _struct = struct;
     _startState = sbtS;
-    _endState = sbtE;
+    _up = sbtU;
+    _down = sbtD;
   }
   
-  public static SBTSequenceModel readModel(String inFile) throws Exception {
+  public static LayeredSequenceModel readModel(String inFile) throws Exception {
     ObjectInputStream ois = new ObjectInputStream(new FileInputStream(inFile));
-    SBTSequenceModel out = (SBTSequenceModel) ois.readObject();
+    LayeredSequenceModel out = (LayeredSequenceModel) ois.readObject();
     ois.close();
-    out._struct = new SparseBackoffTreeStructure(out._branchingFactors);
-    if(out._endArray != null) {
-      System.out.println("arrays found, loading from arrays.");
-      out.updateModelFromEM();
-    }
-    else
-      out.updateModel(out._c._z);
+    out._struct = new SparseBackoffTreeStructure[out._NUMLAYERS];
+    for(int i=0; i<out._NUMLAYERS; i++)
+      out._struct[i] = new SparseBackoffTreeStructure(out._branchingFactors);
+    out.updateModel(out._c._z);
     return out;
   }
   
@@ -1552,129 +1353,52 @@ public class LayeredSequenceModel {
     return new double [] {LL, numWords};    
   }
   
-  //currently requires all test words found in vocab
-  public double [] testOnDocFullPplExact(int doc, double [] wordTopicMarginal, double [][] tm) {
-    double LL = 0.0;
-    double [] ps = new double[_c._docs[doc].size()];
-    
-    TIntArrayList words = _c._docs[doc];
-    int numStates = wordTopicMarginal.length;
-    double [][] dist = new double[words.size()+1][numStates];
-    
-    
-    dist[0][0] = 1.0;
-    for(int i=0; i<dist.length - 1; i++) {
-      int w = words.get(i);
-      //step from i to i+1:
-      double [] pWordGivenState = new double[numStates];
-      double [] pStateGivenPrev = new double[numStates];
-//      for(int j=0; j<dist[i].length;j++) {
-//        sbtForward.addWeighted(this._forward[j], dist[i][j]);
-//      }
-      //intersect:
-      double p = 0.0;
-      double checksum = 0.0;
-      if(i==0) {
-        for(int j=0; j<numStates;j++) {
-          pStateGivenPrev[j] = _startState.getSmoothed(j) / _startState._totalMass;
-          checksum += pStateGivenPrev[j]; 
-        }
-      }
-      else {
-        for(int j=0; j<numStates;j++) {
-          for(int k=0; k<numStates;k++) {
-            pStateGivenPrev[k] += tm[j][k]*dist[i][j];
-          }
-        }
-      }
-      for(int t=0;t<numStates; t++) {
-        //dividing by wordTopicMarginal ensures we use a distribution P(w | t) that sums to one
-        pWordGivenState[t] = _wordToState[w].getSmoothed(t) / wordTopicMarginal[t];
-        //double numt = sbtForward.getSmoothed(t);
-        //pStateGivenPrev[t] = numt / sbtForward._totalMass;
-        dist[i+1][t] = (pWordGivenState[t]*pStateGivenPrev[t]);
-        p += dist[i+1][t];
-      }
-      ps[i] = p;
-      //renormalize:
-      for(int t=0;t<numStates;t++) {
-        dist[i+1][t] /= p;
-      }
-    }
-    
-    for(int i=0; i<ps.length; i++) {
-      LL += Math.log(ps[i]);
-      if(Double.isNaN(LL)) {
-        System.out.println("got NaN with " + ps[i]);
-      }
-    }
-    return new double [] {LL, ps.length};
-  }
   
   //tests on a single document using left-to-right method
   //word topic marginal (i.e. P(topic) computed from P(topic, word)) is supplied to ensure evaluated distribution sums to one
-  public double [] testOnDocFullPpl(int doc, double [] wordTopicMarginal) {
-    boolean CHECKSUMTOONE = false; //slow.  Can use to confirm that test code uses a valid probability distribution over words
+  public double [] testOnDocFullPpl(int doc) {
     double LL = 0.0;
     double [] ps = new double[_c._docs[doc].size()];
     for(int j=0; j<_NUMPARTICLES; j++) {
       TIntArrayList words = _c._docs[doc];
-      for(int i=0; i<words.size(); i++) {
-        _c._z[doc].set(i, -1);
+      for(int layer=0;layer<_NUMLAYERS;layer++) {
+        for(int i=0; i<words.size(); i++) {
+          _c._z[doc][layer].set(i, -1);
+        }
       }
       for(int i=0; i<words.size(); i++) {
         int w = words.get(i);
         double p = 0.0;           
         
-        //resample everything before:
-        for(int k=0; k<i; k++) {
-          int r = sampleZ(doc, k, true);
-          _c._z[doc].set(k, r);
+        //sample this state forward:
+        for(int layer=0;layer<_NUMLAYERS;layer++) {
+          _c._z[doc][layer].set(i, this.sampleZ(doc, layer, i, false, false, false, false));
         }
         
         if(_c._pWord[w]>0.0) {
+          
           //test on this word:
-          double [] pWordGivenState = new double[wordTopicMarginal.length];
-          double [] pStateGivenPrev = new double[wordTopicMarginal.length];
-          double checkSum = 0.0f;
-          int prev = 0;
-          if(i > 0)
-            prev = _c._z[doc].get(i-1);
-          for(int t=0;t<wordTopicMarginal.length; t++) {
-            //dividing by wordTopicMarginal ensures we use a distribution P(w | t) that sums to one
-            
-            pWordGivenState[t] = _wordToState[w].getSmoothed(t) / wordTopicMarginal[t];
-            if(this._forward[prev]._totalMass > 0.0) {
-            double numt = this._forward[prev].getSmoothed(t);
-            checkSum += numt;
-            pStateGivenPrev[t] = numt / this._forward[prev]._totalMass;
+          double [] pOut = new double[this.get_VOCABSIZE()];
+          double normalizer = 0.0;
+          for(int k=0; k<pOut.length; k++) {
+            pOut[k] = 1.0;
+            for(int layer=0; layer<_NUMLAYERS; layer++) {
+              pOut[k] *= this._wordToState[layer][w].getSmoothed(_c._z[doc][layer].get(i)) / this._wordToState[layer][w]._totalMass;
             }
-            else {
-              pStateGivenPrev[t] = 1.0 / (double)pStateGivenPrev.length;
-            }
-            p += (pWordGivenState[t]*pStateGivenPrev[t]);
-            if(Double.isNaN(p))
-              System.err.println("nan.");
-            if(p < 0.0)
-              System.err.println("negative.");
+            normalizer += pOut[k];
           }
-          if(j==0 && (i==0 || (i== _c._docs[doc].size()-1)) && (CHECKSUMTOONE)) {
-            float sDoc = 0.0f;
-            float sWord = 0.0f;
-            float totalTopicMarginal = 0.0f;
-            for(int t=0; t<pWordGivenState.length; t++) {
-              sDoc += pStateGivenPrev[t];
-              sWord += pWordGivenState[t]*wordTopicMarginal[t];
-              totalTopicMarginal += wordTopicMarginal[t];
-            }
-            sWord /= totalTopicMarginal;
-            System.out.println("Check SUM: " + i + "\t" + p + "\t" + sDoc + "\t" + sWord + "\t" + _c._pWord[w]);
+          for(int k=0; k<pOut.length; k++) {
+            pOut[k] /= normalizer;
           }
+          p = pOut[w];
         }
         ps[i] += p;
-        //sample this word:
-        int r = sampleZ(doc, i, true);
-        _c._z[doc].set(i, r);
+        //re-sample using this word:
+        for(int passes=0; passes<5; passes++) {
+          for(int layer=0;layer<_NUMLAYERS;layer++) {
+            _c._z[doc][layer].set(i, this.sampleZ(doc, layer, i, false, true, true, false));
+          }
+        }
       }
     }
     double numWords = 0.0;
@@ -1689,237 +1413,41 @@ public class LayeredSequenceModel {
     }
     return new double [] {LL, numWords};
   }
-
-  public static void extendTraining(String modelFile, String inputFile, String outputFile, String configFile) throws Exception {
-    SBTSequenceModel sbtsm = readModel(modelFile);
-    if(sbtsm._c._changeFactor == null) {
-      sbtsm._c._changeFactor = new TDoubleArrayList[sbtsm._c._z.length];
-      for(int i=0; i<sbtsm._c._changeFactor.length; i++) {
-        sbtsm._c._changeFactor[i] = new TDoubleArrayList();
-        for(int j=0; j<sbtsm._c._z[i].size();j++)
-          sbtsm._c._changeFactor[i].add(1.0);
-      }
-      sbtsm._c.lambda = 0.99; //HACK
-    }
-    sbtsm.readConfigFile(configFile);
-    sbtsm._expansionBranchFactors = sbtsm._branchingFactors;
-    sbtsm.trainModel(sbtsm._NUMITERATIONS, sbtsm._OPTIMIZEINTERVAL, outputFile, true);
-    sbtsm.writeModel(outputFile);
-  }
   
-  public static void train(String inputFile, String outputFile, String configFile, String probsFile) throws Exception {
-    SBTSequenceModel sbtsm = new SBTSequenceModel(configFile);
-    sbtsm.initializeForCorpus(inputFile, sbtsm._struct.numLeaves());
-    if(probsFile != null) {
-      sbtsm.baseProbs = sbtsm.readBaseProbs(probsFile);
+  public static void train(String inputFile, String outputFile, String configFile) throws Exception {
+    LayeredSequenceModel sbtsm = new LayeredSequenceModel(configFile);
+    int [] maxVal = new int[sbtsm._NUMLAYERS];
+    for(int i=0; i<maxVal.length; i++) {
+      maxVal[i] = sbtsm._struct[i].numLeaves();
     }
+    sbtsm.initializeForCorpus(inputFile, maxVal);
     sbtsm.trainModel(sbtsm._NUMITERATIONS, sbtsm._OPTIMIZEINTERVAL, outputFile);
     sbtsm.writeModel(outputFile);
   }
   
-  public static void train(String inputFile, String outputFile, String configFile) throws Exception {
-    train(inputFile, outputFile, configFile, null);
-  }
-
-  //ps has dims docs x models x tokens
-  public static double [] optimizeEnsembleWeights(double [][][] ps) {
-    double [] ws = new double[ps[0].length];
-    Arrays.fill(ws, 1.0/(double)ws.length);
-    double STEPSIZE = 0.0000001;
-    for(int iter = 0; iter<10000; iter++) {
-      double [] grad = new double[ws.length];
-      double LL = 0.0;
-      double [] wordGrad = new double[ws.length];
-      for(int i=0; i<ps.length; i++) {
-        //TODO: fix this non-sequential array traverse
-        for(int j=0; j<ps[i][0].length; j++) {
-          double denom = 0.0;
-          for(int m=0; m<ps[i].length; m++) {
-            wordGrad[m] = ps[i][m][j];
-            denom += ps[i][m][j]*ws[m];
-          }
-          for(int m=0; m<ps[i].length; m++) {
-            grad[m] += wordGrad[m]/denom;
-          }
-          LL += Math.log(denom);
-        }
-      }
-      //HACK: make gradient sum to zero:
-      double gradSum = 0.0;
-      for(int m=0; m<grad.length; m++) {
-        gradSum += grad[m];
-      }
-      for(int m=0; m<grad.length; m++) {
-        grad[m] -= gradSum / (double)grad.length;
-      }
-      double normalizer = 0.0;
-      for(int i=0; i<ws.length;i++) {
-        ws[i] += STEPSIZE*grad[i];
-        ws[i] = Math.max(0,  ws[i]); //don't go below zero
-        normalizer += ws[i];
-      }
-      for(int i=0; i<ws.length;i++) {
-        ws[i] /= normalizer;
-      }
-      if(iter % 100 == 0) {
-        System.out.println(iter + " LL is : " + LL + " Grad is " + Arrays.toString(grad));
-        System.out.println("new weights: " + Arrays.toString(ws));
-      }
-    }
-    return ws;
-  }
-  
-  public static double [] trainEnsemble(SBTSequenceModel [] sbtsm, double [][] wordStateNormalizer, double [][][] tm, String validationFile, int numDocs) throws Exception {
-    System.out.println("train ens num docs: " + numDocs);
-    for(int i=0; i<sbtsm.length; i++) {
-      sbtsm[i]._c.reInitForCorpus(validationFile, numDocs);
-    }
-    double LL = 0.0;
-    double numWords = 0.0;
-    TestGetProbsDoer [] tds = new TestGetProbsDoer[numDocs];
-    ExecutorService e = Executors.newFixedThreadPool(sbtsm[0]._NUMTHREADS);
-    double [] eqW = new double[sbtsm.length];
-    Arrays.fill(eqW,  1.0/(double)eqW.length);
-    //ExecutorService e = Executors.newFixedThreadPool(1);
-    for(int i=0; i<tds.length;i++) {
-      if(sbtsm[0]._MAXTESTDOCSIZE < 0 || sbtsm[0]._c._docs[i].size() > sbtsm[0]._MAXTESTDOCSIZE) {
-        System.out.println("skipping " + i + " size " + sbtsm[0]._c._docs[i].size());
-        continue;
-      }
-      tds[i] = new TestGetProbsDoer(i, wordStateNormalizer, sbtsm, tm, eqW);
-      e.execute(tds[i]);
-    }
-    e.shutdown();
-    boolean terminated = false;
-    while(!terminated) {
-        try {
-          terminated = e.awaitTermination(60,  TimeUnit.SECONDS);
-        }
-        catch (InterruptedException ie) {
-          
-        }
-    }
-    double [][][] ps = new double[numDocs][][];
-    for(int i=0; i<numDocs;i++) {
-      ps[i] = tds[i]._probs;
-    }
-    double [] outW = optimizeEnsembleWeights(ps);
-    return outW;    
-  }
-  
-  //computes log likelihood of model using left-to-right method
-  //returns {ppl, number of tested words}
-  //numDocs is number in test file
-  //maxDocs is number actually tested (starting from the beginning of the file)
-  public static double [] testEnsemble(File [] modelFile, String testFile, int numDocs, int maxDocs, String configFile,
-      String validationFile, int validationDocs, String probsOutfile) throws Exception {
-    SBTSequenceModel [] sbtsm = new SBTSequenceModel[modelFile.length];
-    for(int i=0; i< sbtsm.length; i++) {
-      sbtsm[i] = readModel(modelFile[i].getAbsolutePath());
-      sbtsm[i].readConfigFile(configFile);
-    }
     
-    double [][] wordStateNormalizer = new double[modelFile.length][];
-    double [][][] tm = new double[modelFile.length][][];
-    int [] numStates = new int[sbtsm.length];
-    for(int i=0; i< sbtsm.length; i++) {
-      wordStateNormalizer[i] = getCheckMarginal(sbtsm[i]._wordToState, sbtsm[i]._struct);
-      numStates[i] = wordStateNormalizer[i].length;
-      tm[i] = sbtsm[i].transModel();
-    }
-    
-    double [] ws = new double[sbtsm.length];
-    if(validationFile != null) {
-      ws = trainEnsemble(sbtsm, wordStateNormalizer, tm, validationFile, validationDocs);
-    }
-    else {
-      Arrays.fill(ws, 1.0/(double)ws.length);
-    }
-    for(int i=0; i<sbtsm.length; i++) {
-      sbtsm[i]._c.reInitForCorpus(testFile, numDocs);
-    }
-    double LL = 0.0;
-    double numWords = 0.0;
-    TestEnsembleExactDoer [] tds = new TestEnsembleExactDoer[maxDocs];
-    ExecutorService e = Executors.newFixedThreadPool(sbtsm[0]._NUMTHREADS);
-    //ExecutorService e = Executors.newFixedThreadPool(1);
-    for(int i=0; i<tds.length;i++) {
-      if(sbtsm[0]._MAXTESTDOCSIZE < 0 || sbtsm[0]._c._docs[i].size() > sbtsm[0]._MAXTESTDOCSIZE) {
-        System.out.println("skipping " + i + " size " + sbtsm[0]._c._docs[i].size());
-        continue;
-      }
-      tds[i] = new TestEnsembleExactDoer(i, wordStateNormalizer, sbtsm, tm, ws);
-      e.execute(tds[i]);
-    }
-    e.shutdown();
-    boolean terminated = false;
-    while(!terminated) {
-        try {
-          terminated = e.awaitTermination(60,  TimeUnit.SECONDS);
-        }
-        catch (InterruptedException ie) {
-          
-        }
-    }
-    double [][] psOut = new double[sbtsm[0]._c._docs.length][];
-    for(int i=0; i<tds.length; i++) {
-      if(tds[i]==null)
-        continue;
-      LL += tds[i]._res[0];
-      numWords += tds[i]._res[1];
-      psOut[i] = tds[i]._ps;
-    }
-    System.out.println("Test LL: " + LL);
-    System.out.println("Words: " + numWords);
-    System.out.println("ppl: " + Math.exp(-LL/numWords));
-    if(probsOutfile != null) {
-      writeBaseProbs(probsOutfile, psOut);
-    }
-    return new double [] {LL, numWords};
-  }
   
   //computes log likelihood of model using left-to-right method
   //returns {ppl, number of tested words}
   //numDocs is number in test file
   //maxDocs is number actually tested (starting from the beginning of the file)
   public static double [] testModel(String modelFile, String testFile, int numDocs, int maxDocs, String configFile) throws Exception {
-    boolean CHECKWORDDISTRIBUTION = false;
     
-    SBTSequenceModel sbtsm = readModel(modelFile);
+    LayeredSequenceModel sbtsm = readModel(modelFile);
     sbtsm.readConfigFile(configFile);
-    double [] wordStateNormalizer = getCheckMarginal(sbtsm._wordToState, sbtsm._struct); 
-    int numStates = wordStateNormalizer.length;
-    double [][] tm = sbtsm.transModel();
 
-    float [] pWordGivenState = new float[wordStateNormalizer.length] ; 
-    if(CHECKWORDDISTRIBUTION) {
-      for(int w=0; w<sbtsm._wordToState.length; w++) {
-        for(int t=0;t<wordStateNormalizer.length; t++) {
-          pWordGivenState[t] += sbtsm._wordToState[w].getSmoothed(t) / wordStateNormalizer[t];
-        }
-      }
-      float sum = 0.0f;
-      for(int i=0; i<pWordGivenState.length; i++) {
-        sum += pWordGivenState[i];
-      }
-      
-      System.out.println("Word sum: " + sum + " should be about " + numStates);
-    }
-    
     sbtsm._c.reInitForCorpus(testFile, numDocs);
     sbtsm.setThreadBreaks();
     double LL = 0.0;
     double numWords = 0.0;
-    //TestDoer [] tds = new TestDoer[maxDocs];
-    TestExactDoer [] tds = new TestExactDoer[maxDocs];
+    TestDoer [] tds = new TestDoer[maxDocs];
     ExecutorService e = Executors.newFixedThreadPool(sbtsm._NUMTHREADS);
-    //ExecutorService e = Executors.newFixedThreadPool(1);
     for(int i=0; i<tds.length;i++) {
       if(sbtsm._MAXTESTDOCSIZE < 0 || sbtsm._c._docs[i].size() > sbtsm._MAXTESTDOCSIZE) {
         System.out.println("skipping " + i + " size " + sbtsm._c._docs[i].size());
         continue;
       }
-      tds[i] = sbtsm.new TestExactDoer(i, wordStateNormalizer, tm);
+      tds[i] = sbtsm.new TestDoer(i);
       e.execute(tds[i]);
     }
     e.shutdown();
@@ -1947,163 +1475,7 @@ public class LayeredSequenceModel {
     System.out.println("ppl: " + Math.exp(-ll[0]/ll[1]));
   }
   
-  /**
-   * Outputs the sparse word-to-topic vector proportional to P(t | w)/P(t) for words and topics with positive counts
-   * @param modelFile Contains the model
-   * @param outputFile  Where to write the output
-   * @throws Exception
-   */
-  public static void outputWordToTopicFile(String modelFile, String outputFile) throws Exception {
-    BufferedWriter bwOut = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(outputFile), "UTF8"));
-    SBTSequenceModel sbtsm = readModel(modelFile);
-    for(int i=0; i<sbtsm._c._pWord.length; i++) {
-      if(sbtsm._c._pWord[i] > 0.0) {
-        bwOut.write(i + "\t");
-        TIntDoubleHashMap hm = sbtsm._wordToState[i].getLeafCounts();
-        TIntDoubleIterator it = hm.iterator();
-        while(it.hasNext()) {
-          it.advance();
-          int wId = it.key();
-          double val = it.value();
-          bwOut.write(wId + ":" + val + " ");
-        }
-        bwOut.write("\r\n");
-      }
-    }
-    bwOut.close();
-  }
-  
-  public void testAggregateCounts() {
-    TIntArrayList [] oneZs = new TIntArrayList[1];
-    oneZs[0] = new TIntArrayList();
-    oneZs[0].add(1);
-    oneZs[0].add(2);
-    oneZs[0].add(3);
-    oneZs[0].add(4);
-    oneZs[0].add(5);
-    TIntArrayList [] oneWs = new TIntArrayList[1];
-    oneWs[0] = new TIntArrayList();
-    oneWs[0].add(3);
-    oneWs[0].add(3);
-    oneWs[0].add(3);
-    oneWs[0].add(3);
-    oneWs[0].add(3);
-    TIntDoubleHashMap [] hm = aggregateCounts(-1, oneZs, oneWs);
-    System.out.println("hm is " + hm.length);
-    hm = aggregateCounts(1, oneZs, oneWs);
-    System.out.println("hm is " + hm.length);
-    hm = aggregateCounts(0, oneZs, oneWs);
-    System.out.println("hm is " + hm.length);
-  }
-  
-  //assumes sorted
-  public static double intersectTwo(TIntDoubleHashMap a, TIntDoubleHashMap b, TIntDoubleHashMap c) {
-     double prod = 0.0;
-     for(int k : a.keys()) {
-       if(b.containsKey(k)) {
-         double d =a.get(k)*b.get(k); 
-         prod += d;
-         if(c != null)
-           c.put(k, d);
-       }
-     }
-     return prod;
-  }
-  
-  public static double intersectThree(TIntDoubleHashMap a, TIntDoubleHashMap b, TIntDoubleHashMap c) {
-    TIntDoubleHashMap [] hms = new TIntDoubleHashMap [] {a, b, c};
-    for(int i=0; i<hms.length;i++)
-      if(hms[i]==null)
-        hms[i] = new TIntDoubleHashMap();
-    Arrays.sort(hms, (x, y) -> Integer.compare(x.size(), y.size()));
-    TIntDoubleHashMap firstTwo = new TIntDoubleHashMap();
-    double out = intersectTwo(hms[0], hms[1], firstTwo);
-    out += intersectTwo(hms[0], hms[2], new TIntDoubleHashMap());
-    out += intersectTwo(hms[1], hms[2], new TIntDoubleHashMap());
-    out += intersectTwo(firstTwo, hms[2], new TIntDoubleHashMap());
-    return out;
-  }
-  
-  //returns 3-dim array with {time, count, totalFactor}
-  public static long [] timePass(boolean useSBT, TIntDoubleHashMap [] hmF,
-      TIntDoubleHashMap [] hmW, 
-      TIntDoubleHashMap [] hmB,
-      SBTSequenceModel sbtsm,
-      int maxCount,
-      int factorLow,
-      int factorHigh) {
-    long [] out = new long [3];
-    double sum = 0.0;
-    long start = System.currentTimeMillis();
-    long totalFactor = 0L;
-    for(int i=0; i<sbtsm._c._docs.length; i++) {
-      TIntArrayList doc = sbtsm._c._docs[i];
-      for(int j=1; j<doc.size()-1;j++) {
-        int zPrev = sbtsm._c._z[i].get(j-1);
-        int zNext = sbtsm._c._z[i].get(j+1);
-        int wIdx = doc.get(j);
-        TIntDoubleHashMap fw = hmF[zPrev];
-        TIntDoubleHashMap bw = hmB[zNext];
-        TIntDoubleHashMap word = hmW[wIdx];
-        int [] sizes = new int [] {fw.size(), bw.size(), word.size()};
-        Arrays.sort(sizes);
-        int factor = 2 * sizes[0] + sizes[1];
-        if(factor >= factorHigh || factor < factorLow)
-          continue;
-        if(useSBT) {
-          SparseBackoffTree fwSBT = sbtsm._forward[zPrev];
-          SparseBackoffTree bwSBT = sbtsm._backward[zNext];
-          SparseBackoffTree wordSBT = sbtsm._wordToState[wIdx];
-          sum += (new SparseBackoffTreeIntersection(new SparseBackoffTree [] {fwSBT, bwSBT, wordSBT}))._totalMass;
-        }
-        else
-          sum += intersectThree(fw, bw, word);
-        totalFactor += factor;
-        if(++out[1] == maxCount)
-          break;
-      }
-      if(out[1] == maxCount)
-        break;
-    }
-    out[0] = System.currentTimeMillis() - start;
-    out[2] = totalFactor;
-    System.out.println(sum);
-    return out;
-  }
-  
-  public static void timeTrial(String modelFile) throws Exception {
-    SBTSequenceModel sbtsm = readModel(modelFile);
-    System.out.println("done reading.");
-    TIntDoubleHashMap [] hmF = sbtsm.aggregateCounts(-1, sbtsm._c._z, sbtsm._c._docs);
-    TIntDoubleHashMap [] hmW = sbtsm.aggregateCounts(0, sbtsm._c._z, sbtsm._c._docs);
-    TIntDoubleHashMap [] hmB = sbtsm.aggregateCounts(1, sbtsm._c._z, sbtsm._c._docs);
-    System.out.println("Done building hash maps.");
-    System.out.println("Sampling 20000 words.");
-    
-    int [] buckets = new int [] {0, 62, 125, 250, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 6000, 8000}; 
-    int [] cts = new int [buckets.length - 1];
-    int [] times = new int[buckets.length - 1];
-    int [] timesHash = new int[buckets.length - 1];
-    int [] factors = new int[buckets.length - 1];
-    
-    for(int b=1; b<buckets.length;b++) {
-      long [] timeCt = timePass(true, hmF, hmW, hmB, sbtsm, 20000, buckets[b-1], buckets[b]);
-      times[b-1] = (int)timeCt[0];
-      cts[b-1] = (int)timeCt[1];
-      long [] timeCtHash = timePass(false, hmF, hmW, hmB, sbtsm, 20000, buckets[b-1], buckets[b]);
-      timesHash[b-1] = (int)timeCtHash[0];
-      factors[b-1] = (int)timeCtHash[2];
-    }
-    System.out.println("buckets: " + Arrays.toString(buckets));
-    System.out.println("SBT times: " + Arrays.toString(times));
-    System.out.println("Hash times: " + Arrays.toString(timesHash));
-    System.out.println("Total factors: " + Arrays.toString(factors));
-    System.out.println("cts: " + Arrays.toString(cts));
-    for(int i=1; i<buckets.length;i++) {
-      System.out.println(buckets[i] + "\t" + times[i-1] + "\t" + timesHash[i-1] + "\t" + cts[i-1] + "\t" + factors[i-1]);
-    }
-  }
-  
+   
   public static void main(String[] args) throws Exception {
     if(args.length > 0 && args[0].equalsIgnoreCase("train")) {
       if(args.length != 4) {
@@ -2112,29 +1484,6 @@ public class LayeredSequenceModel {
       }
       train(args[1], args[2], args[3]);
     }
-    else if(args.length > 0 && args[0].equalsIgnoreCase("timeTrial")) {
-      if(args.length != 2) {
-        System.err.println("Usage: timeTrial <model_file>");
-        return;
-      }
-      else {
-        timeTrial(args[1]);
-      }
-    }
-    else if(args.length > 0 && args[0].equalsIgnoreCase("trainFromModel")) { //expands existing model and continues
-      if(args.length != 5) {
-        System.err.println("Usage: trainFromModel <input_file> <model_output_file> <configuration_file> <model_input_file>");
-        return;
-      }
-      extendTraining(args[4], args[1], args[2], args[3]);
-    }
-    else if(args.length > 0 && args[0].equalsIgnoreCase("trainAug")) { //augment existing probs
-      if(args.length != 5) {
-        System.err.println("Usage: trainAug <input_file> <model_output_file> <configuration_file> <probs_file>");
-        return;
-      }
-      train(args[1], args[2], args[3], args[4]);
-    }
     else if(args.length > 0 && args[0].equalsIgnoreCase("test")) {
       if(args.length != 6) {
         System.err.println("Usage: test <model_file> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>");
@@ -2142,41 +1491,8 @@ public class LayeredSequenceModel {
       }
       test(args[1], args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3]);
     }
-    else if(args.length > 0 && args[0].equalsIgnoreCase("wordreps")) {
-      if(args.length != 3) {
-        System.err.println("Usage: wordreps <model_file> <output_file>");
-        return;
-      }
-      outputWordToTopicFile(args[1], args[2]);
-    }
-    else if(args.length > 0 && args[0].equalsIgnoreCase("testEns")) {
-      if(args.length != 6 && args.length != 8) {
-        System.err.println("Usage: test <model_dir> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>"
-            + " [<validation_file> <num_validation_docs>]");
-        return;
-      }
-      File f = new File(args[1]);
-      if(args.length==6)
-        testEnsemble(f.listFiles(), args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3], null, 0, null);
-      else
-        testEnsemble(f.listFiles(), args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3], args[6], 
-            Integer.parseInt(args[7]), null);
-    }
-    else if(args.length > 0 && args[0].equalsIgnoreCase("outputEnsProbs")) {
-      if(args.length != 7 && args.length != 9) {
-        System.err.println("Usage: test <model_dir> <test_file> <configuration_file> <num_docs_in_test_file> <num_docs_to_test>"
-            + " <probs_out_file> [<validation_file> <num_validation_docs>]");
-        return;
-      }
-      File f = new File(args[1]);
-      if(args.length==7)
-        testEnsemble(f.listFiles(), args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3], null, 0, args[6]);
-      else
-        testEnsemble(f.listFiles(), args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3], args[7], 
-            Integer.parseInt(args[8]), args[6]);      
-    }
     else {
-      System.err.println("Usage: <train|trainAug|test|wordreps|testEns|outputEnsProbs> <args...>");
+      System.err.println("Usage: <train|test> <args...>");
     }
   }
   

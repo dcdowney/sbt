@@ -574,7 +574,7 @@ public class SBTSequenceModelRunner {
 	  //testWordEncoding();
 //	  testEnsemble("e:\\data\\10m\\ens_adv", "e:\\data\\10m\\test.dat", 3080);
 //	  testSingleModel("e:\\data\\ptb\\gibbslarge\\ptb.model", "e:\\data\\ptb\\penn_test.dat", 3761);
-//	    testSingleModel("e:\\data\\10m\\gibbslarge6\\10m.model.5", "e:\\data\\10m\\test.dat", 3080);
+//	    testSingleModel("e:\\data\\10m\\gibbslarge6\\10m.model.6", "e:\\data\\10m\\test.dat", 3080);
 	   testEnsemble("e:\\data\\10m\\gibbens", "e:\\data\\10m\\test.dat", 3080);
 	   //2000 full passes:
 	   //18: 538
@@ -641,6 +641,7 @@ public class SBTSequenceModelRunner {
 	    //17 11 7 5: 174
 	    //17 11 7 5 3: 162
 	    //17 11 7 5 3 2: 159
+	    //17 11 7 5 3 2 2: 158
 	    
 	  //no translation table:
 //	  testSingleModel("e:\\data\\10m\\ens_adv\\8down.7", "e:\\data\\10m\\test.dat", 3080);

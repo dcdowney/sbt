@@ -3,20 +3,21 @@ package edu.northwestern.cs.websail.sbt;
 import java.io.BufferedReader;
 import java.io.FileInputStream;
 import java.io.InputStreamReader;
+import java.io.Serializable;
 import java.util.ArrayList;
 
 import gnu.trove.iterator.TIntIterator;
 import gnu.trove.list.array.TDoubleArrayList;
 import gnu.trove.list.array.TIntArrayList;
 
-public class LayeredCorpus {
+public class LayeredCorpus implements Serializable {
 
   private static final long serialVersionUID = 1L;
   
   public int _VOCABSIZE = -1;  
   public int _NUMDOCS = -1;
   public long _NUMTOKENS = -1;
-  public int _NUMLAYERS = -1;
+  public int _NUMLAYERS = 2;
   TIntArrayList [] _docs; //the words
   TIntArrayList [][] _z; //dims: doc x LAYER.  the topic variable assignments  //TODO: think about factoring out
   TIntArrayList [][] _scratchZ; //dims: doc x LAYER.  accumulator for new zs
