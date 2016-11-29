@@ -65,8 +65,14 @@ public class LayeredSequenceModel implements Serializable {
   
   //hard-code these parameters:
   int _NUMLAYERS = 2; //number of layers of latent states in the sequence model
-  boolean [][] _transitionTemplate = new boolean[][] {{true, true},{true, true}}; //dims: MUST BE _NUMLAYERS x _NUMLAYERS
+  boolean [][] _transitionTemplate = new boolean[][] {{true, false},{false, true}}; //dims: MUST BE _NUMLAYERS x _NUMLAYERS
   boolean [] _productionTemplate = new boolean[] {false, true}; //dims: MUST BE _NUMLAYERS
+//  int _NUMLAYERS = 1; //number of layers of latent states in the sequence model
+//  boolean [][] _transitionTemplate = new boolean[][] {{true}}; //dims: MUST BE _NUMLAYERS x _NUMLAYERS
+//  boolean [] _productionTemplate = new boolean[] {true}; //dims: MUST BE _NUMLAYERS
+  
+  
+  
   //assumed internal links are always from layer i to layer i+1
   
   SparseBackoffTree [][][] _forward; //dims: LAYERi-1 x LAYERi x state
@@ -120,7 +126,7 @@ public class LayeredSequenceModel implements Serializable {
   private int _numSkipWords = 0;
   
   public LayeredSequenceModel(String configFile) throws Exception {
-    _c = new LayeredCorpus();
+    _c = new LayeredCorpus(_NUMLAYERS);
     readConfigFile(configFile);
     if(_USEEXPANSION == 1) {
       if(_EXPANSIONSCHEDULE == null) {
@@ -369,19 +375,19 @@ public class LayeredSequenceModel implements Serializable {
     TIntArrayList doc = _c._docs[docId];
     for(int layer=0; layer<_NUMLAYERS; layer++) {
       for(int i=0; i<doc.size(); i++) {
-        double chg = _c._changeFactor[layer][docId].get(i);
+        double chg = _c._changeFactor[docId][layer].get(i);
         if(_r.nextDouble() > chg) { //skip it
           scratchZs[layer].set(i, zs[layer].get(i));
           continue;       
         }
-        int newZ = sampleZ(docId, layer, i, true, true, true, true);
+        int newZ = sampleZ(docId, layer, i, true, true);
         chg = _c.lambda * chg;
         if(newZ != zs[layer].get(i)) {
           changes++;
           chg = 1.0;
         }
         scratchZs[layer].set(i, newZ);
-        _c._changeFactor[layer][docId].set(i, chg);
+        _c._changeFactor[docId][layer].set(i, chg);
       }
     }
     return changes;
@@ -393,7 +399,7 @@ public class LayeredSequenceModel implements Serializable {
   }
   
   //Returns the SBTs and amounts to subtract for the given latent variable
-  public MarkovBlanketContainer getMarkovBlanket(int doc, int layer, int pos, boolean useNext, boolean useLayer, boolean useWord, boolean sub) {
+  public MarkovBlanketContainer getMarkovBlanket(int doc, int layer, int pos, boolean useWord, boolean sub) {
     int w = _c._docs[doc].get(pos);
     int curZ = _c._z[doc][layer].get(pos);
     ArrayList<SparseBackoffTree> sbts = new ArrayList<>();
@@ -407,22 +413,24 @@ public class LayeredSequenceModel implements Serializable {
     else {
       for(int i=0; i<_NUMLAYERS; i++) {
         if(this._transitionTemplate[i][layer]) {
-          SparseBackoffTree sbt = this._forward[layer][i][_c._z[doc][i].get(pos-1)];
-          sbts.add(sbt);
-          if(sub)
-            doubs.add(this._forwardStateMarginal[layer][i][curZ]);
+          if(_c._z[doc][i].get(pos-1) >= 0) {
+            SparseBackoffTree sbt = this._forward[i][layer][_c._z[doc][i].get(pos-1)];
+            sbts.add(sbt);
+            if(sub)
+              doubs.add(this._forwardStateMarginal[i][layer][curZ]);
+          }
         }
       }
     }
     //backward:
-    if(useNext) {
-      if(pos!=_c._docs[doc].size() - 1) {
-        for(int i=0; i<_NUMLAYERS; i++) {
-          if(this._transitionTemplate[layer][i]) {
-            SparseBackoffTree sbt = this._backward[layer][i][_c._z[doc][i].get(pos+1)];
+    if(pos!=_c._docs[doc].size() - 1) {
+      for(int i=0; i<_NUMLAYERS; i++) {
+        if(this._transitionTemplate[layer][i]) {
+          if(_c._z[doc][i].get(pos+1) >= 0) {
+            SparseBackoffTree sbt = this._backward[i][layer][_c._z[doc][i].get(pos+1)];
             sbts.add(sbt);
             if(sub)
-              doubs.add(this._backwardStateMarginal[layer][i][curZ]);
+              doubs.add(this._backwardStateMarginal[i][layer][curZ]);
           }
         }
       }
@@ -438,14 +446,16 @@ public class LayeredSequenceModel implements Serializable {
         }
       }
     }
-    if(useLayer) {
       //layers:
-      if(useNext && layer!=_NUMLAYERS-1) {
+    if(layer!=_NUMLAYERS-1) {
+      if(_c._z[doc][layer+1].get(pos) >= 0) {
         sbts.add(this._up[layer+1][_c._z[doc][layer+1].get(pos)]);
         if(sub)
           doubs.add(this._upStateMarginal[layer+1][curZ]);
       }
-      if(layer!=0) {
+    }
+    if(layer!=0) {
+      if(_c._z[doc][layer-1].get(pos) >= 0) {
         sbts.add(this._down[layer-1][_c._z[doc][layer-1].get(pos)]);
         if(sub)
           doubs.add(this._downStateMarginal[layer-1][curZ]);
@@ -456,20 +466,20 @@ public class LayeredSequenceModel implements Serializable {
     out.sbts = new SparseBackoffTree[sbts.size()];
     out.subs = new double[sbts.size()];
     for(int i=0; i<sbts.size(); i++) {
-      out.subs[i] = doubs.get(i);
+      out.sbts[i] = sbts.get(i);
       if(sub)
-        out.sbts[i] = sbts.get(i);
+        out.subs[i] = doubs.get(i);
     }
     return out;
   }
   
   
-  public int sampleZ(int doc, int layer, int pos, boolean useNext, boolean useLayer, boolean useWord, boolean sub) {
-    MarkovBlanketContainer mbc = getMarkovBlanket(doc, layer, pos, useNext, useLayer, useWord, sub);
+  public int sampleZ(int doc, int layer, int pos, boolean useWord, boolean sub) {
+    MarkovBlanketContainer mbc = getMarkovBlanket(doc, layer, pos, useWord, sub);
     SparseBackoffTreeIntersection sbti;
     int curZ = _c._z[doc][layer].get(pos);
 
-    if(useNext && useWord && useLayer) //proxy for "at training time"
+    if(sub)
       sbti = new SparseBackoffTreeIntersection(mbc.sbts, curZ, mbc.subs, true);
     else
       sbti = new SparseBackoffTreeIntersection(mbc.sbts, true);
@@ -581,7 +591,7 @@ public class LayeredSequenceModel implements Serializable {
             createAdjPut(ac.down[j], z[j].get(i), z[j+1].get(i), 1.0);
           }
           if(this._productionTemplate[j]) {
-            createAdjPut(ac.word[j], z[j].get(i), word, 1.0);
+            createAdjPut(ac.word[j], word, z[j].get(i), 1.0);
           }
         }
       }
@@ -745,6 +755,8 @@ public class LayeredSequenceModel implements Serializable {
     public void updateModel(TIntArrayList [][] zs) {
       System.out.println("arch: " + Arrays.toString(this._branchingFactors));
       System.out.println("second doc samples (layer 0): " + zs[1][0].toString());
+      if(_NUMLAYERS > 1)
+        System.out.println("second doc samples (layer 1): " + zs[1][1].toString());
       if(_c._changeFactor != null)
         System.out.println("second doc chg (layer 0): " + _c._changeFactor[1][0].toString());
       AggregatedCounts ac = this.aggregateCounts(zs, _c._docs);
@@ -1089,11 +1101,11 @@ public class LayeredSequenceModel implements Serializable {
           initDeltas();
           int multiplier = _struct[layer].numLeaves()/curLeaves;
           System.out.println("Expanding to " + Arrays.toString(_branchingFactors));
-          for(int i=0; i<_c._z[layer].length;i++) {
-            for(int j=0; j<_c._z[layer][i].size(); j++) {
-              int z = multiplier * _c._z[layer][i].get(j) + _r.nextInt(multiplier);
-              _c._z[layer][i].set(j,  z);
-              _c._changeFactor[layer][i].set(j, 1.0);
+          for(int i=0; i<_c._z.length;i++) {
+            for(int j=0; j<_c._z[i][layer].size(); j++) {
+              int z = multiplier * _c._z[i][layer].get(j) + _r.nextInt(multiplier);
+              _c._z[i][layer].set(j,  z);
+              _c._changeFactor[i][layer].set(j, 1.0);
             }
           }
         }
@@ -1372,7 +1384,7 @@ public class LayeredSequenceModel implements Serializable {
         
         //sample this state forward:
         for(int layer=0;layer<_NUMLAYERS;layer++) {
-          _c._z[doc][layer].set(i, this.sampleZ(doc, layer, i, false, false, false, false));
+          _c._z[doc][layer].set(i, this.sampleZ(doc, layer, i, false, false));
         }
         
         if(_c._pWord[w]>0.0) {
@@ -1381,11 +1393,14 @@ public class LayeredSequenceModel implements Serializable {
           double [] pOut = new double[this.get_VOCABSIZE()];
           double normalizer = 0.0;
           for(int k=0; k<pOut.length; k++) {
-            pOut[k] = 1.0;
-            for(int layer=0; layer<_NUMLAYERS; layer++) {
-              pOut[k] *= this._wordToState[layer][w].getSmoothed(_c._z[doc][layer].get(i)) / this._wordToState[layer][w]._totalMass;
+            if(_c._pWord[k] >0.0) {
+              pOut[k] = 1.0;
+              for(int layer=0; layer<_NUMLAYERS; layer++) {
+                if(this._productionTemplate[layer])
+                  pOut[k] *= this._wordToState[layer][k].getSmoothed(_c._z[doc][layer].get(i));
+              }
+              normalizer += pOut[k];
             }
-            normalizer += pOut[k];
           }
           for(int k=0; k<pOut.length; k++) {
             pOut[k] /= normalizer;
@@ -1394,9 +1409,22 @@ public class LayeredSequenceModel implements Serializable {
         }
         ps[i] += p;
         //re-sample using this word:
-        for(int passes=0; passes<5; passes++) {
+        //backward:
+//        for(int idx=i-1; idx>=0; idx--) {
+//          for(int layer=0;layer<_NUMLAYERS;layer++) {
+//            _c._z[doc][layer].set(idx, this.sampleZ(doc, layer, idx, true, false));
+//          }
+//        }
+//        //forward:
+//        for(int idx=0; idx<i; idx++) {
+//          for(int layer=0;layer<_NUMLAYERS;layer++) {
+//            _c._z[doc][layer].set(idx, this.sampleZ(doc, layer, idx, true, false));
+//          }
+//        }
+        //current:
+        for(int pass=0; pass<3; pass++) {
           for(int layer=0;layer<_NUMLAYERS;layer++) {
-            _c._z[doc][layer].set(i, this.sampleZ(doc, layer, i, false, true, true, false));
+            _c._z[doc][layer].set(i, this.sampleZ(doc, layer, i, true, false));
           }
         }
       }

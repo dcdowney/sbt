@@ -17,7 +17,7 @@ public class LayeredCorpus implements Serializable {
   public int _VOCABSIZE = -1;  
   public int _NUMDOCS = -1;
   public long _NUMTOKENS = -1;
-  public int _NUMLAYERS = 2;
+  public int _NUMLAYERS = -1;
   TIntArrayList [] _docs; //the words
   TIntArrayList [][] _z; //dims: doc x LAYER.  the topic variable assignments  //TODO: think about factoring out
   TIntArrayList [][] _scratchZ; //dims: doc x LAYER.  accumulator for new zs
@@ -25,6 +25,10 @@ public class LayeredCorpus implements Serializable {
   double lambda = 0.99; //decay for weighted average of how much change
   double [] _pWord; //marginal word prob
 
+  public LayeredCorpus(int nl) {
+    _NUMLAYERS = nl;
+  }
+  
   //returns number of docs
   public int readCorpusDat(String inFile, boolean updatePWord) throws Exception {
     BufferedReader brIn = new BufferedReader(
@@ -59,12 +63,12 @@ public class LayeredCorpus implements Serializable {
           _pWord[j] /= dubToks;
     _NUMDOCS = aldocs.size();
     _docs = aldocs.toArray(new TIntArrayList[aldocs.size()]);
-    _changeFactor = new TDoubleArrayList[_NUMLAYERS][_docs.length];
+    _changeFactor = new TDoubleArrayList[_docs.length][_NUMLAYERS];
     for(int lay=0; lay<_NUMLAYERS; lay++) {
       for(int j=0; j<_docs.length;j++) {
-        _changeFactor[lay][j] = new TDoubleArrayList(_docs[j].size());
+        _changeFactor[j][lay] = new TDoubleArrayList(_docs[j].size());
         for(int k=0; k<_docs[j].size();k++) {
-          _changeFactor[lay][j].add(1.0);//start with maximal change
+          _changeFactor[j][lay].add(1.0);//start with maximal change
         }
       }
     }
@@ -105,14 +109,13 @@ public class LayeredCorpus implements Serializable {
       _docs = new TIntArrayList[numDocs];
       _NUMDOCS = numDocs;
       this.readCorpusDat(testFile, false);
-      _z = new TIntArrayList[_NUMLAYERS][numDocs];
+      _z = new TIntArrayList[numDocs][_NUMLAYERS];
       for(int lay = 0; lay < _NUMLAYERS; lay++) {
         for(int i=0; i<_docs.length; i++) {
-          _z[lay][i] = new TIntArrayList(_docs[i].size());
+          _z[i][lay] = new TIntArrayList(_docs[i].size());
           for(int j=0; j<_docs[i].size(); j++) {
-            int w = _docs[i].get(j);
             int r = -1;
-            _z[lay][i].add(r);
+            _z[i][lay].add(r);
           }
         }
       }
