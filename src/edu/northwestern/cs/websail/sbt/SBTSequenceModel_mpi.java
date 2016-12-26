@@ -1,6 +1,10 @@
 package edu.northwestern.cs.websail.sbt;
 
 import mpi.*;
+import java.text.SimpleDateFormat;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.LinkedList;
 import java.util.Set;
 import com.javamex.classmexer.MemoryUtil;
 import com.javamex.classmexer.MemoryUtil.VisibilityFilter;
@@ -10,12 +14,14 @@ import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FileWriter;
 import java.io.InputStreamReader;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Serializable;
 import java.lang.reflect.Method;
+import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -43,6 +49,31 @@ public class SBTSequenceModel_mpi implements Serializable {
     	public void run() {
     		_changes = sampleRange(_start, _end);
     	}
+    }
+	
+	private class DebugDoer implements Runnable {
+    	int _start;
+    	int _end;
+    	long result = 0;
+    	
+    	public void run() {
+    		System.out.println("Start: " + _start + " End : " + _end);
+    		result = DebugRun(_start, _end);
+    	}
+    }
+	
+    public long DebugRun(int start, int end) {
+    	
+    	long chg = 0;
+    	
+    	long result = 0;
+		for(int i=start; i<=end; i++) {
+				for(int k = 0; k< 1500; k++)
+					for(int l = 0;l<100;l++)
+						result += (i+k+l);
+		}
+
+		return chg;
     }
 	
     private class TestDoer implements Runnable {
@@ -147,6 +178,15 @@ public class SBTSequenceModel_mpi implements Serializable {
 	SparseBackoffTree [] _wordToState;
 	double [] _wordStateMarginal;
 	double [] _backwardStateMarginal;
+	private LinkedList<Integer> _changesList;
+	private int listLength = 40;
+	private double listTrends = 0.40;		//increase percent  0.1 = 10%;
+	private double listThreshold = 0.03;	//within,   5% percent (value)
+	private int buffSize = 100;
+	private static int _wordStoreFlag[];		// if -1: word doesn't exist in this mpi process; other wise, the rank of the mpi process aggregate the sbt
+	private static int _wordReduceFlag[];		// the rank of the mpi process aggregate the sbt
+	private double gibbsChunkSize = 0.05;	//percentage of gibbs partial update. 0.05 = update 5% each sampling 
+	private double gibbsNextPointer = 0.0;	//next gibbs sampling start from gibbsNextPointer% data. consecutive sampling.
 	
 	SparseBackoffTreeStructure _struct;
 	double [] _forwardDelta = null;
@@ -158,7 +198,7 @@ public class SBTSequenceModel_mpi implements Serializable {
 	
 	double [][] baseProbs = null; //holds existing model probabilities when training a layer of an ensemble
 	
-	Random _r = new Random();
+	Random _r = new Random(4);
 	
 	//TODO: think about wrapping all of threading/train config up into a trainer class
 	
@@ -339,96 +379,195 @@ public class SBTSequenceModel_mpi implements Serializable {
 			//extra goes in last thread:
 			_THREADBREAKS[_NUMTHREADS - 1] = _c._NUMDOCS - 1;
 			*/
-			
+
 			//Jaccard split
-			
 			
 			_THREADBREAKS = new int[_NUMTHREADS];
 			int assign[] = new int[_c._NUMDOCS];
 			
-			for(int i=0;i<_c._NUMDOCS;i++)
-				assign[i] = -1;
-			
 			int rank = MPI.COMM_WORLD.getRank();
 			int size = MPI.COMM_WORLD.getSize();
-	
+			
 			PartitionCluster clusters[] = new PartitionCluster[size];
-			
-			for(int i=0;i<size;i++)
-				clusters[i] = new PartitionCluster(i);
-			
-			int tokenPerCluster = 0;
-			
-			for(int i=0;i<_c._NUMDOCS;i++)
-				tokenPerCluster += _c._docs[i].size();
-			tokenPerCluster /= size;
-			tokenPerCluster += 10;
-			
-			int MaxTokenLimit = (int) (tokenPerCluster * (1.0 + MaxTokenThreshold));
-			
-			for(int i=0;i<_c._NUMDOCS;i++)
-			{
-				// get sentence 
-				TIntArrayList sentence = _c._docs[i];
-				int clusterId = -1;
-				for(int j=0;j<size;j++)
-				{
-					double jaccardIndex = 0.0;
-					double tempJaccard = 0.0;	
-					int union = -1;
-					
-					if(clusters[j].token <= MaxTokenLimit)
-					{
-						//select a cluster to assign
-						Set<Integer> wordSet = clusters[j].wordSet;
-						union = 0;
-						TIntIterator it = sentence.iterator();
-						while(it.hasNext()) {
-							int num = it.next();
-							if(!wordSet.contains(num))
-								union ++;
-						}
-						int intersection =  sentence.size() - union;
-						tempJaccard = (double)intersection / union;
-						if( tempJaccard >= jaccardIndex ){
-							jaccardIndex = tempJaccard;
-							clusterId = j;
-						}
-					}
-				}
-				
-				clusters[clusterId].insert(sentence);
-				assign[i] = clusterId;
-			}
-			
 			_PROCESSBREAKS = new int[size];
 			
-			int p = 0;
-			for(int i=0;i<size;i++)
-			{
-				for(int j=0;j<_c._NUMDOCS;j++)
+			if(rank==0){
+				for(int i=0;i<_c._NUMDOCS;i++)
+					assign[i] = -1;
+				
+				for(int i=0;i<size;i++)
+					clusters[i] = new PartitionCluster(i);
+				
+				long tokenPerCluster = 0;
+				
+				for(int i=0;i<_c._NUMDOCS;i++)
+					tokenPerCluster += _c._docs_bk[i].size();
+				tokenPerCluster /= size;
+				tokenPerCluster += 10;
+				
+				long MaxTokenLimit = (long) (tokenPerCluster * (1.0 + MaxTokenThreshold));
+				
+				for(int i=0;i<_c._NUMDOCS;i++)
 				{
-					if(assign[j]==i)
+					// get sentence 
+					TIntArrayList sentence = _c._docs_bk[i];
+					int clusterId = -1;
+					for(int j=0;j<size;j++)
 					{
-						TIntArrayList t;
-						t = _c._docs[j];
-						_c._docs[j] = _c._docs[p];
-						_c._docs[p] = t;
+						double jaccardIndex = 0.0;
+						double tempJaccard = 0.0;	
+						long union = -1;
 						
-						int t_int;
-						
-						t_int = assign[j];
-						assign[j] = assign[p];
-						assign[p] = t_int;
-						
-						p++;
+						if(clusters[j].token <= MaxTokenLimit)
+						{
+							//select a cluster to assign
+							Set<Integer> wordSet = clusters[j].wordSet;
+							union = 0;
+							TIntIterator it = sentence.iterator();
+							while(it.hasNext()) {
+								int num = it.next();
+								if(!wordSet.contains(num))
+									union ++;
+							}
+							long intersection =  sentence.size() - union;
+							tempJaccard = (double)intersection / union;
+							if( tempJaccard >= jaccardIndex ){
+								jaccardIndex = tempJaccard;
+								clusterId = j;
+							}
+						}
+					}
+					
+					if(clusterId==-1){
+						System.out.println("why -1 ? strange");
+						System.out.println("max token size = " + MaxTokenLimit);
+						for(int j=0;j<size;j++)
+							System.out.println("cluster : " + j + " has token " +  clusters[j].token);
+					}
+					
+					clusters[clusterId].insert(sentence);
+					assign[i] = clusterId;
+				}
+				
+				int p = 0;
+				for(int i=0;i<size;i++)
+				{
+					for(int j=0;j<_c._NUMDOCS;j++)
+					{
+						if(assign[j]==i)
+						{		
+							TIntArrayList t;
+							t = _c._docs_bk[j];
+							_c._docs_bk[j] = _c._docs_bk[p];
+							_c._docs_bk[p] = t;
+							
+							int t_int;
+							
+							t_int = assign[j];
+							assign[j] = assign[p];
+							assign[p] = t_int;
+							
+							p++;
+						}
+					}
+					_PROCESSBREAKS[i] = p;
+				}
+				_PROCESSBREAKS[size - 1] = _c._NUMDOCS;
+			}
+			
+			MPI.COMM_WORLD.bcast(_PROCESSBREAKS, _PROCESSBREAKS.length, MPI.INT, 0);
+			
+			int local_total_length = 0;
+			int local_arrays_lengths[] = null;
+			int l = 0;
+			if(rank==0)
+				l = _PROCESSBREAKS[rank];
+			else
+				l = _PROCESSBREAKS[rank] - _PROCESSBREAKS[rank-1];
+			local_arrays_lengths = new int[l];
+			
+			int buffSizes[] = new int[size];
+			
+			if(rank==0){
+				for(int i=0;i<size;i++)
+					buffSizes[i] = 0;
+				for(int i=0;i<_c._NUMDOCS;i++){
+					buffSizes[assign[i]] += _c._docs_bk[i].size();
+				}
+			}
+			
+			MPI.COMM_WORLD.bcast(buffSizes, size, MPI.LONG, 0);
+			
+			for(int i = 0;i<buffSizes.length;i++)
+				assert(buffSizes[i]>=0);
+			
+			
+			
+			int recvBuff[] = new int[buffSizes[rank]];
+			
+			// set recev buff
+
+			for(int i=0;i<size;i++){
+				if(i==0){
+					if(rank==0){
+						int p=0;
+						for(int j=0;j<_PROCESSBREAKS[rank];j++){
+							int temp[] = _c._docs_bk[j].toArray();
+							local_arrays_lengths[j] = temp.length;
+							for(int k=0;k<temp.length;k++)
+								recvBuff[p++] = temp[k];
+						}
 					}
 				}
-				_PROCESSBREAKS[i] = p;
+				else{
+					
+					if(rank==0){
+						int send_local_arrays_lengths[] = new int[_PROCESSBREAKS[i] - _PROCESSBREAKS[i-1]];
+						int sendBuff[] = new int[buffSizes[i]];
+						int p = 0;
+						for(int j=_PROCESSBREAKS[i-1];j<_PROCESSBREAKS[i];j++){
+							send_local_arrays_lengths[j-_PROCESSBREAKS[i-1]] = _c._docs_bk[j].size();
+							int temp[] = _c._docs_bk[j].toArray();
+							for(int k=0;k<temp.length;k++)
+								sendBuff[p++] = temp[k];
+						}
+						MPI.COMM_WORLD.send(sendBuff, sendBuff.length, MPI.INT, i, 0);
+						MPI.COMM_WORLD.send(send_local_arrays_lengths, send_local_arrays_lengths.length, MPI.INT, i, 1);
+					}
+					else{
+						if(i==rank){
+							MPI.COMM_WORLD.recv(recvBuff, recvBuff.length, MPI.INT, 0, 0);
+							MPI.COMM_WORLD.recv(local_arrays_lengths, local_arrays_lengths.length, MPI.INT, 0, 1);
+						}
+					}
+				}
 			}
-			_PROCESSBREAKS[size - 1] = _c._NUMDOCS - 1;
-	
-			long approxToks = clusters[rank].token / _NUMTHREADS;
+			
+			//split recvbuff to _doc & split threads
+			
+			int p = 0;
+			int l_p = 0;
+			ArrayList<TIntArrayList> aldocs = new ArrayList<TIntArrayList>();
+			for(l=0;l<_c._NUMDOCS;l++){
+				if(!within_doc_range(l)){
+					aldocs.add(null);
+					continue;
+				}
+				// why out of bound
+				int temp[] = new int[local_arrays_lengths[l_p++]];
+				for(int j=0;j<temp.length;j++)
+					temp[j] = recvBuff[p++];
+				TIntArrayList ll = new TIntArrayList();
+				ll.addAll(temp);
+				aldocs.add(ll);
+			}
+			
+			_c._docs = aldocs.toArray(new TIntArrayList[aldocs.size()]);
+			
+			if(rank==0)
+				_c._docs_bk = null;
+			
+			long approxToks = buffSizes[rank] / _NUMTHREADS;
 			long ct = 0;
 			int thread = 0;
 			int start = -1;
@@ -437,7 +576,7 @@ public class SBTSequenceModel_mpi implements Serializable {
 			if(rank==0)
 				start = 0;
 			else
-				start = _PROCESSBREAKS[rank-1] + 1;
+				start = _PROCESSBREAKS[rank-1];
 			
 			end = _PROCESSBREAKS[rank];
 			
@@ -450,9 +589,6 @@ public class SBTSequenceModel_mpi implements Serializable {
 			}
 			//extra goes in last thread:
 			_THREADBREAKS[_NUMTHREADS - 1] = _PROCESSBREAKS[rank];
-			
-	
-			
 			
 			/*
 			_THREADBREAKS = new int[_NUMTHREADS];
@@ -500,12 +636,19 @@ public class SBTSequenceModel_mpi implements Serializable {
 	
 	//config file has lines of form <param-name without underscore>\t<integer value> [<integer value> ...]
 	public void readConfigFile(String inFile) throws Exception {
-		System.out.println("reading config file.");
+		
 		BufferedReader brIn = new BufferedReader(
 				new InputStreamReader(new FileInputStream(inFile), "UTF8" ));
 		String sLine;
 		Method [] ms = this.getClass().getMethods();
+		
+		
 		int rank = MPI.COMM_WORLD.getRank();
+		
+		MPI.COMM_WORLD.barrier();
+		long stTime = System.currentTimeMillis();
+		if(rank==0)
+			System.out.println("reading config file.");
 		
 		while((sLine = brIn.readLine())!=null) {
 			if(sLine.startsWith("#"))
@@ -540,6 +683,11 @@ public class SBTSequenceModel_mpi implements Serializable {
 			}
 		}
 		brIn.close();
+		
+		MPI.COMM_WORLD.barrier();
+		stTime = System.currentTimeMillis() - stTime;
+		if(rank==0)
+			System.out.println("finish reading -------reading time = " + stTime);
 	}
 
 	private double [][] readBaseProbs(String inFile) throws Exception {
@@ -644,6 +792,7 @@ public class SBTSequenceModel_mpi implements Serializable {
 	
 
 	protected TIntDoubleHashMap aggregateCounts(TIntArrayList occurs) {
+		System.out.println("call aggregate counts !!!!  delete this output imme");
 		TIntDoubleHashMap out = new TIntDoubleHashMap();
 		TIntIterator it = occurs.iterator();
 		while(it.hasNext()) {
@@ -698,7 +847,7 @@ public class SBTSequenceModel_mpi implements Serializable {
 				}
 			}
 		}
-		SparseBackoffTree sbtWord = this._wordToState[w]; // ?? why null ?
+		SparseBackoffTree sbtWord = this._wordToState[w];
 		boolean unseen = false;
 		//if unseen, using simple smoothing distribution for the purpose of sampling:
 		if(sbtWord==null)
@@ -746,6 +895,16 @@ public class SBTSequenceModel_mpi implements Serializable {
 			sbti = new SparseBackoffTreeIntersection(sbts, curZ, subs, true);
 		else
 			sbti = new SparseBackoffTreeIntersection(sbts, true);
+		
+		if(doc==2000000 && pos == 2){
+    		System.out.println("doc: " + doc  + " pos: " + pos + " word: " + w + " curZ: " + curZ);
+    		for(int i=0;i<sbts.length;i++){
+    			System.out.println("SBT " + i + "---------");
+    			System.out.println(Arrays.toString(sbts[i].toDoubleArray()));
+    		}
+		}
+		
+		
 		int sample = 0;
 		if(baseProbs !=null && !unseen && !forward) {
 			double wordOutProb = sbti._totalMass / sbti._siblingSbtis[0]._totalMass;
@@ -769,16 +928,26 @@ public class SBTSequenceModel_mpi implements Serializable {
     private long sampleRange(int start, int end) {
     	
     	long chg = 0;
-    	
-		for(int i=start; i<=end; i++) {
-			chg += (long)sampleDoc(i);
+
+		for(int i=start; i<end; i++) {
+			
+			if((double)(i-start)/(double)(end-start)>=gibbsNextPointer && (double)(i-start)/(double)(end-start)<(gibbsNextPointer+gibbsChunkSize)){
+				chg += (long)sampleDoc(i);
+			}
+			else{
+				TIntArrayList scratchZs = _c._scratchZ[i];
+				int tArray[] = _c._z[i].toArray();
+				for(int j=0;j<tArray.length;j++)
+					scratchZs.set(j, tArray[j]);
+			}
+				
 		}
 
 		return chg;
     }	
 	
-
-	public void initZ(TIntArrayList [] ds, int maxVal, boolean random, boolean scratch) {
+    //Zheng added: incFile
+	public void initZ(TIntArrayList [] ds, int maxVal, boolean random, boolean scratch, String incFile) throws Exception {
 		TIntArrayList [] zs;
 		if(scratch) {
 			_c._scratchZ = new TIntArrayList[ds.length];
@@ -788,10 +957,38 @@ public class SBTSequenceModel_mpi implements Serializable {
 			_c._z = new TIntArrayList[ds.length];
 			zs = _c._z;
 		}
-		for(int i=0; i<ds.length; i++) {
-			zs[i] = new TIntArrayList(ds[i].size());
-			for(int j=0; j<ds[i].size(); j++)
-				zs[i].add(random ? _r.nextInt(maxVal) : 0); //don't use zero, reserved for start/end
+		
+		if(incFile==null){
+			for(int i=0; i<ds.length; i++) {
+				if(!within_doc_range(i))
+				{
+					continue;
+				}
+				zs[i] = new TIntArrayList(ds[i].size());
+				for(int j=0; j<ds[i].size(); j++)
+				{
+					zs[i].add(random ? _r.nextInt(maxVal) : 0); //don't use zero, reserved for start/end
+//					zs[i].add(random ? 2 : 0); //don't use zero, reserved for start/end
+				}
+			}
+		}
+		else{
+			SBTSequenceModel_mpi t_sbtsm = readModel(incFile);
+			// copy explicitly
+			
+			System.out.println("in file the length of z is " + t_sbtsm._c._z.length);
+			System.out.println("in restart the length of z is " + ds.length);
+			
+			for(int i=0; i<ds.length; i++) {
+				if(!within_doc_range(i))
+				{
+					continue;
+				}
+				
+				zs[i] = new TIntArrayList(ds[i].size());
+				for(int j=0; j<ds[i].size(); j++)
+					zs[i].add(t_sbtsm._c._z[i].get(0));
+			}
 		}
 	}
 
@@ -805,7 +1002,7 @@ public class SBTSequenceModel_mpi implements Serializable {
 	 * @param from  See above
 	 * @return
 	 */
-	public TIntDoubleHashMap [] aggregateCounts(int from, TIntArrayList [] zs, TIntArrayList [] ws) throws MPIException{
+	public TIntDoubleHashMap [] aggregateCounts(int from, TIntArrayList [] zs, TIntArrayList [] ws, int partialUpdate) throws MPIException{
 		TIntDoubleHashMap [] hm;
 		
 		//handle start/end as special case
@@ -813,6 +1010,10 @@ public class SBTSequenceModel_mpi implements Serializable {
 			hm = new TIntDoubleHashMap[1];
 			hm[0] = new TIntDoubleHashMap();
 			for(int i=0; i<zs.length; i++) {
+				if(!within_doc_range(i) && (partialUpdate==1))
+				{
+					continue;
+				}
 				if(from==-2) {
 					hm[0].adjustOrPutValue(zs[i].get(0), 1.0, 1.0);
 				}
@@ -820,50 +1021,140 @@ public class SBTSequenceModel_mpi implements Serializable {
 					hm[0].adjustOrPutValue(zs[i].get(zs[i].size()-1), 1.0, 1.0);
 				}
 			}
-			return hm;
 		}
-		
-		if(from==0)
-			hm = new TIntDoubleHashMap[_c._VOCABSIZE];
-		else
-			hm = new TIntDoubleHashMap[_struct.numLeaves()];
-		
-		//forward steps from word j to j+1
-		//backward steps from j+1 to j
-		//word steps to j
-		for(int i=0; i<zs.length; i++) {
-			for(int j=0; j<zs[i].size(); j++) {
-				int xID = -1;
-				int z = -1;
-				if(j==zs[i].size()-1 && from !=0) //no transition here
-					continue;
-				if(from == -1) {
-					xID = zs[i].get(j);
-					z = zs[i].get(j+1);
-				}
-				else if(from == 1) {
-					xID = zs[i].get(j+1);
-					z = zs[i].get(j);
-				}
-				else if(from==0){// modified structure !!!! zheng
-					if(!within_doc_range(i))
-					{
-						continue;
-					}
-					xID = ws[i].get(j);
-					z = zs[i].get(j);
-				}
-				else
+		else{
+			if(from==0)
+				hm = new TIntDoubleHashMap[_c._VOCABSIZE];
+			else
+				hm = new TIntDoubleHashMap[_struct.numLeaves()];
+			
+			//forward steps from word j to j+1
+			//backward steps from j+1 to j
+			//word steps to j
+			for(int i=0; i<zs.length; i++) {
+				if(!within_doc_range(i) && (partialUpdate==1))
 				{
-					xID = ws[i].get(j);
-					z = zs[i].get(j);
+					continue;
 				}
-				if(hm[xID] == null)
-					hm[xID] = new TIntDoubleHashMap();
-				hm[xID].adjustOrPutValue(z, 1.0, 1.0);
+				for(int j=0; j<zs[i].size(); j++) {
+					int xID = -1;
+					int z = -1;
+					if(j==zs[i].size()-1 && from !=0) //no transition here
+						continue;
+					if(from == -1) {
+						xID = zs[i].get(j);
+						z = zs[i].get(j+1);
+					}
+					else if(from == 1) {
+						xID = zs[i].get(j+1);
+						z = zs[i].get(j);
+					}
+					else if(from==0){// modified structure !! zheng
+						xID = ws[i].get(j);
+						z = zs[i].get(j);
+					}
+					else
+					{
+						xID = ws[i].get(j);
+						z = zs[i].get(j);
+					}
+					if(hm[xID] == null)
+						hm[xID] = new TIntDoubleHashMap();
+					hm[xID].adjustOrPutValue(z, 1.0, 1.0);
+				}
 			}
 		}
-		return hm;
+		
+		
+		/*
+		// reduce hm
+		int totalNum = _struct.numLeaves() * hm.length;
+		
+		double hmArray[] = new double[totalNum];
+		
+		int pos = 0;
+		for(int i=0;i<hm.length;i++){
+			if(hm[i]==null){
+				for(int j=0;j<_struct.numLeaves();j++){
+					hmArray[pos++] = 0.0;
+				}
+			}
+			else{
+				for(int j=0;j<_struct.numLeaves();j++){
+					hmArray[pos++] = hm[i].get(j);
+				}
+			}
+		}
+		
+		MPI.COMM_WORLD.allReduce(hmArray, hmArray.length, MPI.DOUBLE, MPI.SUM);
+
+		TIntDoubleHashMap [] newHm;
+		
+		newHm = new TIntDoubleHashMap[hm.length];
+		
+		pos = 0;
+		
+		for(int i=0;i<hm.length;i++){
+			
+			for(int j=0;j<_struct.numLeaves();j++){
+				if(newHm[i]==null && hmArray[pos]!=0){
+					newHm[i] = new TIntDoubleHashMap();
+				}
+				if(hmArray[pos]!=0)
+					newHm[i].put(j, hmArray[pos]);
+				pos++;
+			}
+		}
+		*/
+		
+		double hmArray[] = new double[_struct.numLeaves() * buffSize];
+		TIntDoubleHashMap [] newHm;	
+		newHm = new TIntDoubleHashMap[hm.length];
+		
+		for(int i = 0;i< hm.length;){
+			int len = buffSize;
+			if(i+buffSize>hm.length)
+				len = hm.length - i;
+			
+			int pos = 0;
+			for(int j=0;j<len;j++){
+				if(hm[i+j]==null){
+					for(int k=0;k<_struct.numLeaves();k++){
+						hmArray[pos++] = 0.0;
+					}
+				}
+				else{
+					for(int k=0;k<_struct.numLeaves();k++){
+						hmArray[pos++] = hm[i+j].get(k);
+					}
+				}
+			}
+			
+			MPI.COMM_WORLD.allReduce(hmArray, len*_struct.numLeaves(), MPI.DOUBLE, MPI.SUM);
+			
+			pos = 0;
+			
+			for(int j=0;j<len;j++){
+				if(from==0 && partialUpdate==1 && _wordStoreFlag[i+j]==-1){
+					pos += _struct.numLeaves();
+				}
+				else{
+					for(int k=0;k<_struct.numLeaves();k++){
+						if(newHm[i+j]==null && hmArray[pos]!=0.0){
+							newHm[i+j] = new TIntDoubleHashMap();
+						}
+						if(hmArray[pos]!=0.0)
+							newHm[i+j].put(k, hmArray[pos]);
+						pos++;
+					}
+				}
+			}
+			
+			
+			i+=len;
+		}
+		
+		return newHm;
 	}
 	
 	private boolean within_doc_range(int a) throws MPIException {
@@ -874,11 +1165,11 @@ public class SBTSequenceModel_mpi implements Serializable {
 		if(rank==0)
 			start = 0;
 		else
-			start = this._PROCESSBREAKS[rank-1]+1;
+			start = this._PROCESSBREAKS[rank-1];
 		
 		end = this._PROCESSBREAKS[rank];
 		
-		if(start<=a&&end>=a)
+		if(start<=a&&end>a)
 			return true;
 		else
 			return false;
@@ -896,13 +1187,16 @@ public class SBTSequenceModel_mpi implements Serializable {
 	 * @return
 	 */
 	public SparseBackoffTree [] getParamsFromZs(double [] dsWords, int from, TIntArrayList [] zs,
-			TIntArrayList [] ws) throws MPIException{
+			TIntArrayList [] ws, int partialUpdate) throws MPIException{
 		//aggregate:
-		TIntDoubleHashMap [] hm = aggregateCounts(from, zs, ws);
+		// if from ==0 make a word map to reduce the parameter space
+		
+		TIntDoubleHashMap [] hm = aggregateCounts(from, zs, ws, partialUpdate);
+		
+		// null hm entrires to reduce parameter space
 		SparseBackoffTree [] out = new SparseBackoffTree[hm.length];
 		
-		for(int i=0; i<hm.length; i++) {
-			
+		for(int i=0; i<hm.length; i++) {			
 			if(hm[i]==null && i!=0 && from==0)
 				out[i] = null;
 			else
@@ -921,6 +1215,7 @@ public class SBTSequenceModel_mpi implements Serializable {
 				out[i].smoothAndAddMass(z, val, dsWords);
 			}
 		}
+		
 		return out;
 	}
 	
@@ -928,22 +1223,102 @@ public class SBTSequenceModel_mpi implements Serializable {
 	 * reads the corpus and initializes zs and model
 	 * @param inFile
 	 * @param maxVal
+	 * @param incFile
 	 * @return
 	 * @throws Exception
 	 */
-	public int initializeForCorpus(String inFile, int maxVal) throws Exception {
+	//Zheng added: incFile: null, if init; not null if restart
+	public int initializeForCorpus(String inFile, int maxVal, String incFile) throws Exception {
+		
+		int rank = MPI.COMM_WORLD.getRank();
+		MPI.COMM_WORLD.barrier();
+		if(rank==0)
+			System.out.println("before reading corpus----");
 		int toks = _c.readCorpusDat(inFile, true);
+		
 		setThreadBreaks(0);
-		initZ(_c._docs, maxVal, true, false);
-		updateModel(_c._z);
+		
+		this._wordStoreFlag = new int[_c._VOCABSIZE];
+		this._wordReduceFlag = new int[_c._VOCABSIZE];
+		
+		for(int i=0;i<_c._VOCABSIZE;i++){
+			_wordStoreFlag[i] = -1;
+			_wordReduceFlag[i] = -1;
+		}
+		
+		if(rank==0)
+			System.out.println("doc length = " + _c._docs.length);
+		
+		for(int i=0;i<_c._docs.length;i++){
+			if(within_doc_range(i)){
+				for(int j=0;j<_c._docs[i].size();j++){
+					_wordStoreFlag[_c._docs[i].get(j)] = 0;
+					_wordReduceFlag[_c._docs[i].get(j)] = rank;
+				}
+			}
+		}
+		
+		MPI.COMM_WORLD.allReduce(_wordReduceFlag, _wordReduceFlag.length, MPI.INT, MPI.MAX);
+		if(rank==0)
+			System.out.println("before InitZ");
+		initZ(_c._docs, maxVal, true, false, incFile);
+		updateModel(_c._z,1);
+		getWordToStateSize();
+		
 		return toks;
 	}
 	
-    private int gibbsPass() throws MPIException{ 
-    	
-    	
-    	
-    	int changes= 0 ;
+	private double[] getWordToStateSize() throws Exception{
+		int rank = MPI.COMM_WORLD.getRank();
+		int size = MPI.COMM_WORLD.getSize();
+		long wordToStateSize = 0;
+		long tLong[] = {0};
+		double r[] = new double[]{-1.0,-1.0};
+		
+		for(int k=0;k<_wordToState.length;k++)
+			wordToStateSize += SparseBackoffTree.SparseBackoffTreeSize(_wordToState[k]);
+		tLong[0] = wordToStateSize;
+		MPI.COMM_WORLD.allReduce(tLong, 1, MPI.LONG, MPI.SUM);
+		r[0] = (double)(tLong[0]/1024/1024)/1024.0/(double)size;
+//		if(rank==0)
+//			System.out.println("ave wordToStateSBT size is" + r[0] + " GB ");
+		
+		tLong[0] = wordToStateSize;
+		MPI.COMM_WORLD.allReduce(tLong, 1, MPI.LONG, MPI.MAX);
+		r[1] = (double)(tLong[0]/1024/1024)/1024.0;
+//		if(rank==0)
+//			System.out.println("largest wordToStateSBT size is" + r[1] + " GB ");
+		
+		return r;
+	}
+	
+	private double[] getUsedMemSize()throws Exception{
+		int rank = MPI.COMM_WORLD.getRank();
+		int size = MPI.COMM_WORLD.getSize();
+		double[] r = new double[]{-1.0,-1.0};
+		long tLong[] = {-1};
+		long ttLong[] = {-1};
+		
+		Runtime rt = Runtime.getRuntime();
+		rt.gc();
+		
+		tLong[0] = rt.totalMemory()-rt.freeMemory();
+		
+		MPI.COMM_WORLD.allReduce(tLong, ttLong, 1, MPI.LONG, MPI.SUM);
+		r[0] = (double)(ttLong[0]/1024/1024)/1024.0/(double)size;
+//		if(rank==0)
+//			System.out.println("ave memory usage is " + r[0] + " GB per MPI_process");
+		
+		MPI.COMM_WORLD.allReduce(tLong, ttLong, 1, MPI.LONG, MPI.MAX);
+		r[1] = (double)(ttLong[0]/1024/1024)/1024.0;
+//		if(rank==0)
+//			System.out.println("max memory usage is " + r[1] + " GB");
+		
+		return r;
+	}
+	
+    private long gibbsPass() throws MPIException{
+    	long changes= 0 ;
 	    GibbsDoer [] gds = new GibbsDoer[_NUMTHREADS];
 	    long stTime = System.currentTimeMillis();
 	    //MPI part
@@ -956,14 +1331,14 @@ public class SBTSequenceModel_mpi implements Serializable {
 				if(i==0)
 					gds[i]._start = 0;
 				else
-					gds[i]._start = _THREADBREAKS[i-1] + 1;
+					gds[i]._start = _THREADBREAKS[i-1];
 			}
 			else
 			{
 				if(i==0)
-					gds[i]._start = _PROCESSBREAKS[rank-1] + 1;
+					gds[i]._start = _PROCESSBREAKS[rank-1];
 				else
-					gds[i]._start = _THREADBREAKS[i-1] + 1;
+					gds[i]._start = _THREADBREAKS[i-1];
 			}
 			gds[i]._end = _THREADBREAKS[i];
 		}
@@ -974,6 +1349,7 @@ public class SBTSequenceModel_mpi implements Serializable {
 			e.execute(gds[i]);
 		}
 		e.shutdown();
+		
 		boolean terminated = false;
 		while(!terminated) {
     		try {
@@ -983,53 +1359,24 @@ public class SBTSequenceModel_mpi implements Serializable {
     			
     		}
 		}
+//		System.out.println("rank " + rank + " finished job, start = " + gds[0]._start + " , end = " + gds[0]._end);
 		
 		for(int i=0; i<_NUMTHREADS; i++) {
 			changes += gds[i]._changes;
 		}
 		
-		int g_changes[] = {0};
-		int t_changes[] = {0};
+		long g_changes[] = {0};
+		long t_changes[] = {0};
 		t_changes[0] = changes;
 		// reduce changes
-		MPI.COMM_WORLD.allReduce(t_changes, g_changes, 1, MPI.INT, MPI.SUM);
 		
-		changes = t_changes[0];
+		MPI.COMM_WORLD.allReduce(t_changes, g_changes, 1, MPI.LONG, MPI.SUM);
 		
-		
-	    
-	    //multi thread part
-	    /*
-    		ExecutorService e = Executors.newFixedThreadPool(_NUMTHREADS);
-    		for(int i=0; i<_NUMTHREADS;i++) {
-    			gds[i] = new GibbsDoer();
-    			gds[i]._start = 0;
-    			if(i > 0)
-    				gds[i]._start = _THREADBREAKS[i-1] + 1;
-    			gds[i]._end = _THREADBREAKS[i];
-    			e.execute(gds[i]);
-    		}
-    		e.shutdown();
-    		boolean terminated = false;
-    		while(!terminated) {
-	    		try {
-	    			terminated = e.awaitTermination(60,  TimeUnit.SECONDS);
-	    		}
-	    		catch (InterruptedException ie) {
-	    			
-	    		}
-    		}
-    		
-    		for(int i=0; i<_NUMTHREADS; i++) {
-    			changes += gds[i]._changes;
-    		}
-    		
-//    		System.out.println("total = " + changes);
-    	*/
+		changes = g_changes[0];
 	    
     	stTime = System.currentTimeMillis() - stTime;
     	if(rank==0)
-    		System.out.println("\ttime: " + stTime + "\tchanges: " + changes + "\tskipWords: " + _numSkipWords);
+    		System.out.println("All MPI job finished \ttime: " + stTime + "\tchanges: " + changes + "\tskipWords: " + _numSkipWords);
     	_numSkipWords = 0;
     	//System.out.println(Arrays.toString(_topicMarginal));
     	return changes;
@@ -1040,11 +1387,41 @@ public class SBTSequenceModel_mpi implements Serializable {
 	//returns array of amt_i
 	//such that if we divide leaf counts by amt_i, we get smoothing with marginal P(z)
     //(see paper)
-	public static double [] getNormalizers(SparseBackoffTree [] shds, SparseBackoffTreeStructure struct) throws MPIException{
+	public static double [] getNormalizers(SparseBackoffTree [] shds, SparseBackoffTreeStructure struct, int partialUpdate, int from) throws MPIException{
 		int numStates = struct.numLeaves();
 		double [] count = new double[numStates];
 		double [] smoothing = new double[numStates];
-		SparseBackoffTree shdAgg = SparseBackoffTree.sum(shds, struct);
+		
+		int rank = MPI.COMM_WORLD.getRank();
+		SparseBackoffTree shdAgg;
+		
+		if(from==0 && partialUpdate==1){
+			// add only one time for duplicated word
+			
+			shdAgg = SparseBackoffTree.sum(shds, struct, _wordReduceFlag, rank);
+			
+		}
+		else{
+			shdAgg = SparseBackoffTree.sum(shds, struct);
+		}
+		
+		/*
+		double t_countsum = 0.0;
+		double t_totalmass = 0.0;
+		for(int j=0;j<shds.length;j++){
+			shdAgg = shds[j];
+			t_totalmass = shds[j]._totalMass;
+			for(int i=0;i<numStates;i++){
+				double [] smoothAndCount = shdAgg.getSmoothAndCount(i);
+				t_countsum += smoothAndCount[1];
+			}
+		}
+		
+		System.out.println("local count sum = " + t_countsum);
+		System.out.println("local mass = " + t_totalmass);
+		*/
+		
+		
 		double maxSmooth = 0.0f;
 		double sumCount = 0.0f;
 		double sumSmoother = 0.0f;
@@ -1059,15 +1436,24 @@ public class SBTSequenceModel_mpi implements Serializable {
 			sumSmoother += smoothing[i];
 		}
 		
-		double t_sumCount[] = {sumCount};
-		double t_sumSmoother[] = {sumSmoother};
 		
-		MPI.COMM_WORLD.allReduce(count, count.length, MPI.DOUBLE, MPI.SUM);
-		MPI.COMM_WORLD.allReduce(smoothing, smoothing.length, MPI.DOUBLE, MPI.SUM);
-		MPI.COMM_WORLD.allReduce(t_sumCount, 1, MPI.DOUBLE, MPI.SUM);
-		MPI.COMM_WORLD.allReduce(t_sumSmoother, 1, MPI.DOUBLE, MPI.SUM);
-		sumCount = t_sumCount[0];
-		sumSmoother = t_sumSmoother[0];
+		if(partialUpdate==1 && from==0){	
+			
+			MPI.COMM_WORLD.allReduce(count, count.length, MPI.DOUBLE, MPI.SUM);
+			MPI.COMM_WORLD.allReduce(smoothing, smoothing.length, MPI.DOUBLE, MPI.SUM);
+			
+			maxSmooth = 0.0;
+			sumSmoother = 0.0;
+			sumCount = 0.0;
+			
+			for(int i=0; i<numStates; i++) {
+				sumSmoother += smoothing[i];
+				sumCount += count[i];
+				if(smoothing[i] > maxSmooth) {
+					maxSmooth = smoothing[i];
+				}
+			}
+		}
 		
 		double [] out = new double[numStates];
 		double target = Math.max(maxSmooth + 1.0f, (sumSmoother + sumCount)/numStates);
@@ -1076,10 +1462,9 @@ public class SBTSequenceModel_mpi implements Serializable {
 			if(out[i] < 0.0f)
 				System.out.println("zero or negative normalizer!");
 		}
+		
 		return out;
 	}
-	
-	
 	
 	public static double [] getCheckMarginal(SparseBackoffTree [] shds, SparseBackoffTreeStructure struct) {
 		int numStates = struct.numLeaves();
@@ -1095,19 +1480,32 @@ public class SBTSequenceModel_mpi implements Serializable {
 	/**
 	 * Updates the model given the topic assignments (_z) and divides by marginal for next sampling pass
 	 */
-    public void updateModel(TIntArrayList [] zs) throws MPIException{
-    	System.out.println("arch: " + Arrays.toString(this._branchingFactors));
-		System.out.println("second doc samples: " + zs[1].toString());
-		this._startState = getParamsFromZs(_forwardDelta, -2, zs, _c._docs)[0];
-		this._forward = getParamsFromZs(_forwardDelta, -1, zs, _c._docs);
-		this._backward = getParamsFromZs(_backwardDelta, 1, zs, _c._docs);
-		this._endState = getParamsFromZs(_backwardDelta, 2, zs, _c._docs)[0];
-		this._wordToState = getParamsFromZs(_wordDelta, 0, zs, _c._docs);
-		
+	// Zheng added 'partialUpdate' parameter: 1, partial update wordToState    0, update all
+	
+    public void updateModel(TIntArrayList [] zs,int partialUpdate) throws MPIException{
+    	int rank = MPI.COMM_WORLD.getRank();
+    	int size = MPI.COMM_WORLD.getSize();
+    	
+    	if(rank==0){
+    		System.out.println("arch: " + Arrays.toString(this._branchingFactors));
+//    		System.out.println("second doc samples: " + zs[1].toString());
+    	}
+    	
+		this._startState = getParamsFromZs(_forwardDelta, -2, zs, _c._docs, partialUpdate)[0];
+		this._forward = getParamsFromZs(_forwardDelta, -1, zs, _c._docs, partialUpdate);
+		this._backward = getParamsFromZs(_backwardDelta, 1, zs, _c._docs, partialUpdate);
+		this._endState = getParamsFromZs(_backwardDelta, 2, zs, _c._docs, partialUpdate)[0];
+		this._wordToState = getParamsFromZs(_wordDelta, 0, zs, _c._docs, partialUpdate);
+				
 		SparseBackoffTree [] comb = Arrays.copyOf(_backward, _backward.length + 1);
 		comb[_backward.length] = _endState;
-		this._backwardStateMarginal = getNormalizers(comb, _struct);
-		this._wordStateMarginal = getNormalizers(_wordToState, _struct);
+		
+		//Zheng add:  partial get Normalizer or global get Normalizer : 1 partial update 0: update all
+		
+		this._backwardStateMarginal = getNormalizers(comb, _struct, partialUpdate, 1);
+		
+		this._wordStateMarginal = getNormalizers(_wordToState, _struct, partialUpdate, 0);
+		
 		for(int i=0; i<_backward.length; i++) {
 			_backward[i].divideCountsBy(_backwardStateMarginal);
 		}
@@ -1117,12 +1515,11 @@ public class SBTSequenceModel_mpi implements Serializable {
 				_wordToState[i].divideCountsBy(_wordStateMarginal);	
 		}
 		
-		int rank = MPI.COMM_WORLD.getRank();
-		if(rank==0){
-			System.out.println("\tdiscounts forward: " + Arrays.toString(_forwardDelta) + 
-					"\tbackward " + Arrays.toString(_backwardDelta) +
-						"\tword " + Arrays.toString(_wordDelta));
-		}
+//		if(rank==0){
+//			System.out.println("\tdiscounts forward: " + Arrays.toString(_forwardDelta) + 
+//					"\tbackward " + Arrays.toString(_backwardDelta) +
+//						"\tword " + Arrays.toString(_wordDelta));
+//		}
     }
     
     /**
@@ -1331,7 +1728,7 @@ public class SBTSequenceModel_mpi implements Serializable {
     	double STEPDEC = 0.8; //decrease step size this much each step
     	int NUMSTEPS = 10; //number of steps to take
 
-    	TIntDoubleHashMap [] hm = aggregateCounts(0, zs, _c._docs);
+    	TIntDoubleHashMap [] hm = aggregateCounts(0, zs, _c._docs,1);
     	System.out.println("words:");
     	double step = STEPSIZE;
     	for(int i=0; i<NUMSTEPS; i++) {
@@ -1343,9 +1740,9 @@ public class SBTSequenceModel_mpi implements Serializable {
     		if(i != null)
     			totalparams += i.size();
     	}
-    	hm = aggregateCounts(-1, zs, _c._docs);
+    	hm = aggregateCounts(-1, zs, _c._docs, 1);
     	TIntDoubleHashMap [] hm2 = Arrays.copyOf(hm, hm.length + 1);
-    	hm2[hm.length] = aggregateCounts(-2, zs, _c._docs)[0];
+    	hm2[hm.length] = aggregateCounts(-2, zs, _c._docs, 1)[0];
     	hm = hm2;
     	long transParams = 0L;
     	for(TIntDoubleHashMap i : hm) {
@@ -1358,9 +1755,9 @@ public class SBTSequenceModel_mpi implements Serializable {
         	gradientStep(_forwardDelta, hm, step, false);
         	step *= STEPDEC;
     	}
-    	hm = aggregateCounts(1, zs, _c._docs);
+    	hm = aggregateCounts(1, zs, _c._docs, 1);
     	hm2 = Arrays.copyOf(hm, hm.length + 1);
-    	hm2[hm.length] = aggregateCounts(2, zs, _c._docs)[0];
+    	hm2[hm.length] = aggregateCounts(2, zs, _c._docs, 1)[0];
     	hm = hm2;
     	System.out.println("backward:");
     	step = STEPSIZE;
@@ -1388,14 +1785,17 @@ public class SBTSequenceModel_mpi implements Serializable {
     		_struct = new SparseBackoffTreeStructure(_branchingFactors);
     		initDeltas();
     		int multiplier = _struct.numLeaves()/curLeaves;
-    		System.out.println("Expanding to " + Arrays.toString(_branchingFactors));
+    		int rank = MPI.COMM_WORLD.getRank();
+    		if(rank==0)
+    			System.out.println("Expanding to " + Arrays.toString(_branchingFactors));
     		for(int i=0; i<_c._z.length;i++) {
     			for(int j=0; j<_c._z[i].size(); j++) {
     				int z = multiplier * _c._z[i].get(j) + _r.nextInt(multiplier);
+//    				int z = multiplier * _c._z[i].get(j) + 1;
     				_c._z[i].set(j,  z);
     			}
     		}
-    		updateModel(_c._z);
+    		updateModel(_c._z, 1);
     		return true;
     	}
     	else
@@ -1409,72 +1809,207 @@ public class SBTSequenceModel_mpi implements Serializable {
      * @param  updateInterval	number of iterations between hyperparameter updates
      * @param  outFile   writes model to here before each expansion
      */
-	public void trainModel(int iterations, int updateInterval, String outFile) throws Exception {
+	public void trainModel(int iterations, int updateInterval, String outFile, int start_j) throws Exception {
 		boolean done = false;
-		int j=0;
+		int j=start_j;
 		int maxVal = _struct.numLeaves();
 		int rank = MPI.COMM_WORLD.getRank();
 		int size = MPI.COMM_WORLD.getSize();
 		int start = -1;
 		int end = -1;
+		
+		FileWriter fw = null;
+		BufferedWriter bw = null;
+		
+		FileWriter fw_1 = null;
+		BufferedWriter bw_1 = null;
+		
+		long totalTime = 0;
+		if(rank==0){
+
+			fw = new FileWriter("./time.log");
+			bw = new BufferedWriter(fw);
+			bw.write("MPI_num = " + size);
+			bw.newLine();
+			bw.write("Thread per MPI = " + _NUMTHREADS);
+			bw.newLine();
+			bw.write("total thread = " + size*_NUMTHREADS);
+			bw.newLine();
+			bw.flush();
+			
+			fw_1 = new FileWriter("./changes.log");
+			bw_1 = new BufferedWriter(fw_1);
+		}
+		
+		_changesList = new LinkedList<Integer>();
+		
+		long totalChanges = 0;
+		long initTimer = 0;
+		long gibbsTimer = 0;
+		long updateTimer = 0;
+		long optTimer = 0;
+		
 		while(!done) {
-			for(int i=1; i<=iterations; i++) {
-				long stTime = System.currentTimeMillis();
-				initZ(_c._docs, maxVal, false, true); //init scratch array to zero
-				gibbsPass();
-				int ori_array[] = null;
-				int array_size[] = {-1};
-				MPI.COMM_WORLD.barrier();
-				for(int k=0;k<size;k++)
-				{
-					int root = k;
-					if(k==0)
-						start = 0;
-					else
-						start = _PROCESSBREAKS[k-1] + 1;
-					
-					end = _PROCESSBREAKS[k];
-					
-					for(int l=start;l<=end;l++)
-					{
-						if(rank==root)
-						{
-							ori_array = _c._scratchZ[l].toArray();
-							array_size[0] = ori_array.length;
-						}
-						MPI.COMM_WORLD.bcast(array_size, 1, MPI.INT, root);
-						if(rank!=root)
-						{
-							ori_array = new int[array_size[0]];
-						}
-						MPI.COMM_WORLD.bcast(ori_array, array_size[0], MPI.INT, root);
-						if(rank!=root)
-						{
-							TIntArrayList t = new TIntArrayList();
-							t.reset();
-							t.add(ori_array);
-							_c._scratchZ[l] = t;
-						}
-					}
-				}
+			for(int i=1; i<=iterations*(int)(1.0/gibbsChunkSize); i++) {
 				
-				if((i % updateInterval)==0) { 
-					optimizeParameters(_c._scratchZ);
-				}
-				updateModel(_c._scratchZ);
-				_c._z = _c._scratchZ;
-				stTime = System.currentTimeMillis() - stTime;
 				MPI.COMM_WORLD.barrier();
-			}
-			if(this._USEEXPANSION == 1) {
+				long stTime = System.currentTimeMillis();
+				long tTime = stTime;
+				if(rank==0)
+					System.out.println("before initZ: "+timeTag());
+				
+				initZ(_c._docs, maxVal, false, true, null); //init scratch array to zero
+				
+				MPI.COMM_WORLD.barrier();
+				if(rank==0)
+					System.out.println("after initZ & before gibbs pass"+timeTag());
+				tTime = System.currentTimeMillis() - tTime;
+				initTimer += tTime;
+				
+				tTime = System.currentTimeMillis();
+				
+		    	for(int x=2000000;x<2000005;x++){
+		    		if(_c._z[x]!=null){
+		    			System.out.println(x + " doc-samles: " + _c._z[x].toString() + " doc-content: " + _c._docs[x].toString());
+		    		}
+		    	}
+		    	
+				long changes = gibbsPass();
+				
+				MPI.COMM_WORLD.barrier();
+				tTime = System.currentTimeMillis() - tTime;
+				gibbsTimer += tTime;
+				
+				gibbsNextPointer += gibbsChunkSize;
+				
+				if(gibbsNextPointer>=1.0)
+					gibbsNextPointer = 0.0;
 				
 				if(rank==0)
-					writeModel(outFile + "." + j);
+					System.out.println("after gibbs pass" + timeTag());
+				
+				totalChanges += changes;
+				
+				MPI.COMM_WORLD.barrier();
+				tTime = System.currentTimeMillis();
+				if((i % (updateInterval*(int)(1.0/gibbsChunkSize)))==0) {
+					if(rank==0)
+						System.out.println("before optimize" + timeTag());
+					optimizeParameters(_c._scratchZ);
+					if(rank==0)
+						System.out.println("after optimize" + timeTag());
+				}
+				
+				MPI.COMM_WORLD.barrier();
+				tTime = System.currentTimeMillis() - tTime;
+				optTimer += tTime;
+				
+				if(rank==0)
+					System.out.println("before update Model" + timeTag());
+				tTime = System.currentTimeMillis();
+				
+				updateModel(_c._scratchZ, 1);
+				
+				MPI.COMM_WORLD.barrier();
+				tTime = System.currentTimeMillis() - tTime;
+				updateTimer += tTime;
+				
+				_c._z = _c._scratchZ;
+				MPI.COMM_WORLD.barrier();
+				if(rank==0)
+					System.out.println("passed the barrier after updateModel" + timeTag());
+				stTime = System.currentTimeMillis() - stTime;
+				totalTime += stTime;
+				
+				double memSize[] = getUsedMemSize();
+				
+				if(rank==0){
+					
+					bw_1.write("iteration" + i + "\n");
+					bw_1.write("ave mem usage = " + memSize[0] + "GB" + "\n");
+					bw_1.write("max mem usage = " + memSize[1] + "GB" + "\n");
+					bw_1.write("changes= " + Long.toString(totalChanges) + "\n");
+					bw_1.write("wordStateMarginal= " );
+					for(int k=0;k<_wordStateMarginal.length;k++)
+						bw_1.write(Double.toString(_wordStateMarginal[k])+", ");
+					bw_1.newLine();
+					bw_1.write("_forward[0]._totalMass= " + Double.toString(_forward[0]._totalMass) + "\n");
+					bw_1.write("discounts forward: " + Arrays.toString(_forwardDelta) + 
+							"\tbackward " + Arrays.toString(_backwardDelta) +
+								"\tword " + Arrays.toString(_wordDelta)+"\n\n");
+					bw_1.flush();
+					totalChanges = 0;
+					bw.write("iter " + i + " initZ_time= " + initTimer + "\n");
+					bw.write("iter " + i + " gibbs_time= " + gibbsTimer + "\n");
+					bw.write("iter " + i + " update_time= " + updateTimer + "\n");
+					bw.write("iter " + i + " optimization_time= " + optTimer + "\n");
+					bw.write("iter " + i + " total_time= " + stTime + "\n");
+					bw.newLine();
+					bw.flush();
+					initTimer = 0;
+					gibbsTimer = 0;
+					updateTimer = 0;
+					optTimer = 0;
+				}
+			}
+			
+			if(this._USEEXPANSION == 1) {
+				writeModel(outFile + "." + j);
 				j++;
 				done = !expandModel(j);
 			}
 			else 
 				done = true;
+		}
+		
+		if(rank==0){
+			bw.write("total time = " + totalTime);
+			bw.newLine();
+			bw.close();
+			System.out.println("total training time = " + totalTime + timeTag());
+			
+			bw_1.close();
+		}
+	}
+	
+	private String timeTag(){
+		String timeStamp = new SimpleDateFormat("HH:mm:ss").format(Calendar.getInstance().getTime());
+		return " (time = " + timeStamp +")";
+	}
+	
+	private boolean changesLevelOff(int changes){
+		
+		Integer changesArray[];
+		double sum = 0.0;
+		
+		if(_changesList.size()>=listLength){
+			_changesList.remove(0);
+			_changesList.add(changes);
+			changesArray = _changesList.toArray(new Integer[listLength]);
+			
+			for(int i=0;i<listLength-1;i++){
+				if(changesArray[i]<=changesArray[i+1])
+					sum += 1.0/(double)(listLength-1);
+			}
+			
+			double diff;
+			
+			if(sum > listTrends){
+				for(int i=0;i<listLength-1;i++){
+					diff = (double)(Math.abs(changesArray[i] - changesArray[listLength-1]))/(double)(changesArray[listLength-1]);
+					if(diff>listThreshold)
+						return false;
+				}
+				return true;
+			}
+			else{
+				return false;
+			}
+		}
+		else
+		{
+			_changesList.add(changes);
+			return false;
 		}
 	}
 	
@@ -1485,18 +2020,156 @@ public class SBTSequenceModel_mpi implements Serializable {
 		SparseBackoffTree sbtS = this._startState;
 		SparseBackoffTree sbtE = this._endState;
 		SparseBackoffTreeStructure struct = this._struct;
+		int wordStoreFlag[] = this._wordStoreFlag;
+		int wordReduceFlag[] = this._wordReduceFlag;
+		
 		_struct = null;
 		_wordToState = null;
 		_forward = null;
 		_backward = null;
 		_startState = null;
 		_endState = null;
+		_wordStoreFlag = null;
+		_wordReduceFlag = null;
+		
+		//collect _c._z[]
+		
+
+		
+		// Use MPI_Allgetherv instead, maybe
 		int rank = MPI.COMM_WORLD.getRank();
+		int size = MPI.COMM_WORLD.getSize();
+		int start,end;
+		
+		int buff[] = null;
+		int buff_array_size[] = null;
+		
+		
+		// copy _c._z
+		
+		for(int k=1;k<size;k++)
+		{
+			int root = k;
+			if(k==0)
+				start = 0;
+			else
+				start = _PROCESSBREAKS[k-1];
+			
+			end = _PROCESSBREAKS[k];
+			
+			int buff_size = end-start;
+			buff_array_size = new int[buff_size];
+			
+			int total_count = 0;
+			
+			if(rank==root){
+				for(int l=start;l<end;l++){
+					buff_array_size[l-start] = _c._z[l].size();
+					total_count += _c._z[l].size();
+				}
+				MPI.COMM_WORLD.send(buff_array_size, buff_array_size.length, MPI.INT, 0, 0);
+				buff = new int[total_count];
+				
+				int p=0;
+				for(int l=start;l<end;l++){
+					int ori_array[] = _c._z[l].toArray();
+					for(int i=0;i<ori_array.length;i++)
+						buff[p++] = ori_array[i];
+				}
+				MPI.COMM_WORLD.send(buff, buff.length, MPI.INT, 0, 1);
+			}
+			else if(rank==0){
+				MPI.COMM_WORLD.recv(buff_array_size, buff_array_size.length, MPI.INT, root, 0);
+				for(int i=0;i<buff_array_size.length;i++)
+					total_count += buff_array_size[i];
+				buff = new int[total_count];
+				MPI.COMM_WORLD.recv(buff, buff.length, MPI.INT, root, 1);
+				int p = 0;
+				for(int i=0;i<buff_array_size.length;i++){
+					int ori_array[] = new int[buff_array_size[i]];
+					for(int j=0;j<buff_array_size[i];j++)
+						ori_array[j] = buff[p++];
+					TIntArrayList t = new TIntArrayList();
+					t.reset();
+					t.add(ori_array);
+					_c._z[start+i] = t;
+				}
+			}
+		}
+		
 		if(rank==0)
 		{
-			ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(outFile));
+			ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(outFile+".part_1"));
 			oos.writeObject(this);
 			oos.close();
+			
+			for(int i=0;i<_c._z.length;i++){
+				if(!within_doc_range(i))
+					_c._z[i]=null;
+			}
+		}	
+		
+		// copy _c._doc
+		
+		for(int k=1;k<size;k++)
+		{
+			int root = k;
+			if(k==0)
+				start = 0;
+			else
+				start = _PROCESSBREAKS[k-1];
+			
+			end = _PROCESSBREAKS[k];
+			
+			int buff_size = end-start;
+			buff_array_size = new int[buff_size];
+			
+			int total_count = 0;
+			
+			if(rank==root){
+				for(int l=start;l<end;l++){
+					buff_array_size[l-start] = _c._docs[l].size();
+					total_count += _c._docs[l].size();
+				}
+				MPI.COMM_WORLD.send(buff_array_size, buff_array_size.length, MPI.INT, 0, 0);
+				buff = new int[total_count];
+				
+				int p=0;
+				for(int l=start;l<end;l++){
+					int ori_array[] = _c._docs[l].toArray();
+					for(int i=0;i<ori_array.length;i++)
+						buff[p++] = ori_array[i];
+				}
+				MPI.COMM_WORLD.send(buff, buff.length, MPI.INT, 0, 1);
+			}
+			else if(rank==0){
+				MPI.COMM_WORLD.recv(buff_array_size, buff_array_size.length, MPI.INT, root, 0);
+				for(int i=0;i<buff_array_size.length;i++)
+					total_count += buff_array_size[i];
+				buff = new int[total_count];
+				MPI.COMM_WORLD.recv(buff, buff.length, MPI.INT, root, 1);
+				int p = 0;
+				for(int i=0;i<buff_array_size.length;i++){
+					int ori_array[] = new int[buff_array_size[i]];
+					for(int j=0;j<buff_array_size[i];j++)
+						ori_array[j] = buff[p++];
+					TIntArrayList t = new TIntArrayList();
+					t.reset();
+					t.add(ori_array);
+					_c._docs[start+i] = t;
+				}
+			}
+		}
+
+		if(rank==0)
+		{
+			ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(outFile+".part_2"));
+			oos.writeObject(this);
+			oos.close();
+			for(int i=0;i<_c._docs.length;i++){
+				if(!within_doc_range(i))
+					_c._docs[i]=null;
+			}
 		}
 		_wordToState = sbtW;
 		_forward = sbtF;
@@ -1504,6 +2177,8 @@ public class SBTSequenceModel_mpi implements Serializable {
 		_struct = struct;
 		_startState = sbtS;
 		_endState = sbtE;
+		_wordStoreFlag = wordStoreFlag;
+		_wordReduceFlag = wordReduceFlag;
 		
 		/*
 		int blank_count = 0;
@@ -1517,29 +2192,26 @@ public class SBTSequenceModel_mpi implements Serializable {
 		System.out.println("rank :" + rank + "  "+"forward size = " + _forward.length+ "num of leaf = " + _forward[0]._struct.numLeaves());
 		System.out.println("rank :" + rank + "  "+"backward size = " + _backward.length + "num of leaf = " + _backward[0]._struct.numLeaves());
 		*/
-		/*
-		 * 
-		 * 	double [] _wordStateMarginal;
-	double [] _backwardStateMarginal;
-	
-	SparseBackoffTreeStructure _struct;
-	double [] _forwardDelta = null;
-	double [] _backwardDelta = null;
-	double [] _wordDelta = null;
-	
-	Corpus _c;
-	
-	double [][] baseProbs = null;
-		 */
 
 	}
 	
 	public static SBTSequenceModel_mpi readModel(String inFile) throws Exception {
-		ObjectInputStream ois = new ObjectInputStream(new FileInputStream(inFile));
+		ObjectInputStream ois = new ObjectInputStream(new FileInputStream(inFile+".part_1"));
+		ObjectInputStream ois_2 = new ObjectInputStream(new FileInputStream(inFile+".part_2"));
+		
 		SBTSequenceModel_mpi out = (SBTSequenceModel_mpi) ois.readObject();
+		SBTSequenceModel_mpi out_2 = (SBTSequenceModel_mpi) ois_2.readObject();
 		ois.close();
+		ois_2.close();
+		
+		out._c._docs = out_2._c._docs;
+		
+		out_2 = null;
+		
 		out._struct = new SparseBackoffTreeStructure(out._branchingFactors);
-		out.updateModel(out._c._z);
+		System.out.println("before update");
+		out.updateModel(out._c._z, 0);
+		System.out.println("after update");
 		return out;
 	}
 	
@@ -1734,6 +2406,10 @@ public class SBTSequenceModel_mpi implements Serializable {
 			}
 			for(int t=0;t<numStates; t++) {
 				//dividing by wordTopicMarginal ensures we use a distribution P(w | t) that sums to one
+				if(_wordToState[w]==null){
+					System.out.println("w = " + w + "  is empty -> replaced with unk wordID: 832");
+					_wordToState[w] = _wordToState[832];
+				}
 				pWordGivenState[t] = _wordToState[w].getSmoothed(t) / wordTopicMarginal[t];
 				//double numt = sbtForward.getSmoothed(t);
 				//pStateGivenPrev[t] = numt / sbtForward._totalMass;
@@ -1834,21 +2510,94 @@ public class SBTSequenceModel_mpi implements Serializable {
 		}
 		return new double [] {LL, numWords};
 	}
-
-	public static void train(String inputFile, String outputFile, String configFile, String probsFile) throws Exception {
+	//Zheng added: incFile paramter: null if init, not null if restart from previous Z
+	public static void train(String inputFile, String outputFile, String configFile, String probsFile, String incFile) throws Exception {
+		int rank = MPI.COMM_WORLD.getRank();
 		SBTSequenceModel_mpi sbtsm = new SBTSequenceModel_mpi(configFile);
-		sbtsm.initializeForCorpus(inputFile, sbtsm._struct.numLeaves());
+		if(rank==0)
+			System.out.println("----construction function----");
+		sbtsm.initializeForCorpus(inputFile, sbtsm._struct.numLeaves(),incFile);
+		
 		if(probsFile != null) {
 			sbtsm.baseProbs = sbtsm.readBaseProbs(probsFile);
 		}
-		sbtsm.trainModel(sbtsm._NUMITERATIONS, sbtsm._OPTIMIZEINTERVAL, outputFile);
-		int rank = MPI.COMM_WORLD.getRank();
-		if(rank==0)
-			sbtsm.writeModel(outputFile);
+		if(incFile==null)
+			sbtsm.trainModel(sbtsm._NUMITERATIONS, sbtsm._OPTIMIZEINTERVAL, outputFile,0);
+		else
+		{
+			String[] aa = incFile.split("\\.");
+			int start_j = Integer.parseInt(aa[aa.length-1]);
+			System.out.println("before train mode : " + start_j);
+			sbtsm.trainModel(sbtsm._NUMITERATIONS, sbtsm._OPTIMIZEINTERVAL, outputFile,start_j+1);
+		}
+		
+		sbtsm.writeModel(outputFile);
 	}
 	
 	public static void train(String inputFile, String outputFile, String configFile) throws Exception {
-		train(inputFile, outputFile, configFile, null);
+		train(inputFile, outputFile, configFile, null,null);
+	}
+	
+	public long debugfun(int numthreads) throws Exception{
+		
+		int glen = 100000;
+		
+		int rank = MPI.COMM_WORLD.getRank();
+		int size = MPI.COMM_WORLD.getSize();
+		
+		if(glen%size!=0)
+			System.out.println("glen not dividable !!!!");
+		//num of summation for each MPI process
+		int llen = glen/size;
+		
+		if(llen%numthreads!=0)
+			System.out.println("llen not dividable !!!");
+		//num of summation for each threads
+		int slen = llen/numthreads;
+		
+		int lstart = rank*llen;
+		DebugDoer [] dds = new DebugDoer[numthreads];
+		
+		for(int i=0;i<numthreads;i++){
+			dds[i] = new DebugDoer();
+			dds[i]._start = lstart + slen*i;
+			dds[i]._end = lstart + slen*(i+1)-1;
+		}
+		ExecutorService e = Executors.newFixedThreadPool(numthreads);
+		MPI.COMM_WORLD.barrier();
+		long stTime = System.currentTimeMillis();
+		
+		for(int i=0;i<numthreads;i++){
+			e.execute(dds[i]);
+		}
+		
+		e.shutdown();
+		boolean terminated = false;
+		while(!terminated) {
+    		try {
+    			terminated = e.awaitTermination(60,  TimeUnit.SECONDS);
+    		}
+    		catch (InterruptedException ie) {
+    			
+    		}
+		}
+		
+		MPI.COMM_WORLD.barrier();
+		stTime = System.currentTimeMillis() - stTime;
+    	if(rank==0)
+    		System.out.println("\ttime: " + stTime);
+    	
+		return 0;
+	}
+	
+	public static void debug(int numthreads) throws Exception{
+		SBTSequenceModel_mpi sbtsm;
+		
+		String configFile = "./SBT.config";
+		
+		sbtsm = new SBTSequenceModel_mpi(configFile);
+		
+		sbtsm.debugfun(numthreads);
 	}
 
 	//ps has dims docs x models x tokens
@@ -2141,6 +2890,18 @@ public class SBTSequenceModel_mpi implements Serializable {
 		boolean CHECKWORDDISTRIBUTION = false;
 		
 		SBTSequenceModel_mpi sbtsm = readModel(modelFile);
+		System.out.println("forward");
+		for(int i=0;i<20;i++){
+				System.out.println(Arrays.toString(sbtsm._forward[i].toDoubleArray()));
+		}
+		System.out.println("backward");
+		for(int i=0;i<20;i++){
+				System.out.println(Arrays.toString(sbtsm._backward[i].toDoubleArray()));
+		}
+		
+		return null;
+		
+		/*
 		sbtsm.readConfigFile(configFile);
 		double [] wordStateNormalizer = getCheckMarginal(sbtsm._wordToState, sbtsm._struct); 
 		int numStates = wordStateNormalizer.length;
@@ -2172,6 +2933,9 @@ public class SBTSequenceModel_mpi implements Serializable {
 		
 		ExecutorService e = Executors.newFixedThreadPool(1);
 		//ExecutorService e = Executors.newFixedThreadPool(1);
+		
+		System.out.println("tds . length = " + tds.length + " total doc =  " + sbtsm._c._docs.length);
+		
 		for(int i=0; i<tds.length;i++) {
 			if(sbtsm._MAXTESTDOCSIZE < 0 || sbtsm._c._docs[i].size() > sbtsm._MAXTESTDOCSIZE) {
 				System.out.println("skipping " + i + " size " + sbtsm._c._docs[i].size());
@@ -2214,12 +2978,18 @@ public class SBTSequenceModel_mpi implements Serializable {
 		
 		MPI.COMM_WORLD.allReduce(t_LL, g_LL, 1, MPI.DOUBLE, MPI.SUM);
 		MPI.COMM_WORLD.allReduce(t_numWords, g_numWords, 1, MPI.DOUBLE, MPI.SUM);
-		
+
 		LL = g_LL[0];
 		numWords = g_numWords[0];
 		
 		
-		// multi thread
+		
+		
+		return new double [] {LL, numWords};
+		*/
+	}
+	
+	// multi thread
 		/*
 		ExecutorService e = Executors.newFixedThreadPool(sbtsm._NUMTHREADS);
 		//ExecutorService e = Executors.newFixedThreadPool(1);
@@ -2248,9 +3018,6 @@ public class SBTSequenceModel_mpi implements Serializable {
 			numWords += tds[i]._res[1];
 		}
 		*/
-		
-		return new double [] {LL, numWords};
-	}
 	
 	public static void test(String modelFile, String inputFile, int numDocsInFile, int numDocsToTest, String configFile) throws Exception {
 		double [] ll = testModel(modelFile, inputFile, numDocsInFile, numDocsToTest, configFile);
@@ -2299,11 +3066,11 @@ public class SBTSequenceModel_mpi implements Serializable {
 		oneWs[0].add(3);
 		oneWs[0].add(3);
 		oneWs[0].add(3);
-		TIntDoubleHashMap [] hm = aggregateCounts(-1, oneZs, oneWs);
+		TIntDoubleHashMap [] hm = aggregateCounts(-1, oneZs, oneWs, 1);
 		System.out.println("hm is " + hm.length);
-		hm = aggregateCounts(1, oneZs, oneWs);
+		hm = aggregateCounts(1, oneZs, oneWs, 1);
 		System.out.println("hm is " + hm.length);
-		hm = aggregateCounts(0, oneZs, oneWs);
+		hm = aggregateCounts(0, oneZs, oneWs, 1);
 		System.out.println("hm is " + hm.length);
 	}
 	
@@ -2318,7 +3085,23 @@ public class SBTSequenceModel_mpi implements Serializable {
 				return;
 			}
 			
+			InetAddress ip;
+	        String hostname;
+
+			ip = InetAddress.getLocalHost();
+            hostname = ip.getHostName();
+			
 			train(args[1], args[2], args[3]);
+		}
+		else if(args.length > 0 && args[0].equalsIgnoreCase("trainInc")) { //restart from previous module
+			if(args.length != 5) {
+				int rank = MPI.COMM_WORLD.getRank();
+				if(rank==0)
+					System.err.println("Usage: trainInc <input_file> <model_output_file> <configuration_file> <restart_model_file>");
+				MPI.Finalize();
+				return;
+			}
+			train(args[1], args[2], args[3], null,args[4]);
 		}
 		else if(args.length > 0 && args[0].equalsIgnoreCase("trainAug")) { //augment existing probs
 			if(args.length != 5) {
@@ -2326,7 +3109,7 @@ public class SBTSequenceModel_mpi implements Serializable {
 				MPI.Finalize();
 				return;
 			}
-			train(args[1], args[2], args[3], args[4]);
+			train(args[1], args[2], args[3], args[4],null);
 		}
 		else if(args.length > 0 && args[0].equalsIgnoreCase("test")) {
 			int rank = MPI.COMM_WORLD.getRank();
@@ -2340,8 +3123,10 @@ public class SBTSequenceModel_mpi implements Serializable {
 			}
 			
 			if(size>1){
-				System.err.println("test phase only supports 1 MPI process currently");
+				if(rank==0)
+					System.err.println("test phase only supports 1 MPI process currently");
 				MPI.Finalize();
+				return;
 			}
 			
 			test(args[1], args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3]);
@@ -2382,6 +3167,10 @@ public class SBTSequenceModel_mpi implements Serializable {
 				testEnsemble(f.listFiles(), args[2], Integer.parseInt(args[4]), Integer.parseInt(args[5]), args[3], args[7], 
 						Integer.parseInt(args[8]), args[6]);			
 		}
+		else if(args.length > 0 && args[0].equalsIgnoreCase("Debug")){
+			if(args.length==2)
+			debug(Integer.parseInt(args[1]));
+		}
 		else {
 			System.err.println("Usage: <train|trainAug|test|wordreps|testEns|outputEnsProbs> <args...>");
 			MPI.Finalize();
@@ -2390,6 +3179,4 @@ public class SBTSequenceModel_mpi implements Serializable {
 		
 		MPI.Finalize();
 	}
-
-	
 }
